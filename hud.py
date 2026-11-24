@@ -3,13 +3,13 @@
 
 Renders a multi-line real-time statusline for Antigravity CLI:
   Line 1: [Model ◑ high] │ project git:(branch*) │ ⏱ 1h 35m
-  Line 2: 上下文 ████░░░░░░ 18% │ AGY: 85% (3h 13m) | AI Pro │ 5h: 30% (3h 13m) | 7d: 98% (1d 10h) | Codex
+  Line 2: 上下文 ████░░░░░░ 18% │ Gemini 5h: 92% (4h 12m) | 7d: 88% (5d 3h) │ 3P 5h: 75% (2h 40m) | 7d: 81% (6d 1h)
   Line 3: 1 AGENTS.md | 1 MCPs | 21 Skills
   Line 4: ✓ Read ×8 | ✓ Shell ×4 | ✓ Edit ×2 | ✓ Write ×1 | +1 more
   Line 5: ◐ Subagent [model] (12s)   (only when active or completed within 60s)
 
-Supports both one-shot stdin mode and persistent streaming stdin mode,
-plus `--refresh-quota` for non-blocking background quota cache refresh.
+Reads AGY's native dual quota pools (Gemini + 3P) directly from stdin.quota,
+with optional fallback to local LanguageServer quota cache (`--refresh-quota`).
 """
 from __future__ import annotations
 
@@ -158,13 +158,11 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "contextCriticalThreshold": 85,
         "showTokenBreakdown": True,
         "showUsage": True,
-        "usageCompact": True,
+        "quotaPools": "both",
         "usageValue": "remaining",
+        "showQuotaBars": False,
         "showPlanTier": True,
-        "showExternalUsage": True,
-        "externalUsagePath": str(HOME_DIR / ".claude" / "codex-quota" / "usage.json"),
-        "externalUsageFreshnessMs": 600000,
-        "sevenDayThreshold": 0,
+        "fallbackLocalServerQuota": False,
         "showConfigCounts": True,
         "showSkillCounts": True,
         "showTools": True,
@@ -312,7 +310,11 @@ def visual_width(text: str) -> int:
     return w
 
 
-def get_terminal_width(config: dict[str, Any]) -> int:
+def get_terminal_width(config: dict[str, Any], data: dict[str, Any] | None = None) -> int:
+    if isinstance(data, dict):
+        tw = data.get("terminal_width")
+        if isinstance(tw, int) and tw > 20:
+            return tw
     cfg_w = config.get("maxWidth")
     if isinstance(cfg_w, int) and cfg_w > 20:
         return cfg_w
@@ -469,43 +471,58 @@ def shorten_plan_tier(plan_tier: str) -> str:
 
 # ── Git Status ─────────────────────────────────────────────────────────────────
 
-def get_git_status(cwd: str, git_cfg: dict[str, Any]) -> dict[str, Any] | None:
-    if not cwd or not git_cfg.get("enabled", True):
-        return None
-    if not os.path.isdir(cwd):
-        return None
-    try:
-        branch_out = subprocess.check_output(
-            ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            stderr=subprocess.DEVNULL,
-            timeout=0.4,
-        ).strip()
-    except Exception:
-        return None
-    if not branch_out:
+def get_git_status(
+    cwd: str,
+    git_cfg: dict[str, Any],
+    data: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    if not git_cfg.get("enabled", True):
         return None
 
+    # Fast path: use native AGY stdin.vcs when provided
+    vcs = data.get("vcs") if isinstance(data, dict) else None
+    branch_out = ""
     dirty = False
-    if git_cfg.get("showDirty", True):
+    used_vcs_fast_path = False
+    if isinstance(vcs, dict) and isinstance(vcs.get("branch"), str) and vcs.get("branch").strip():
+        branch_out = vcs["branch"].strip()
+        dirty = bool(vcs.get("dirty", False)) if git_cfg.get("showDirty", True) else False
+        used_vcs_fast_path = True
+
+    if not used_vcs_fast_path:
+        if not cwd or not os.path.isdir(cwd):
+            return None
         try:
-            porcelain = subprocess.check_output(
-                ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+            branch_out = subprocess.check_output(
+                ["git", "-C", cwd, "rev-parse", "--abbrev-ref", "HEAD"],
                 text=True,
                 encoding="utf-8",
                 errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=0.4,
             ).strip()
-            dirty = bool(porcelain)
         except Exception:
-            dirty = False
+            return None
+        if not branch_out:
+            return None
+
+        if git_cfg.get("showDirty", True):
+            try:
+                porcelain = subprocess.check_output(
+                    ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    stderr=subprocess.DEVNULL,
+                    timeout=0.4,
+                ).strip()
+                dirty = bool(porcelain)
+            except Exception:
+                dirty = False
 
     ahead = 0
     behind = 0
-    if git_cfg.get("showAheadBehind", False):
+    if git_cfg.get("showAheadBehind", False) and cwd and os.path.isdir(cwd):
         try:
             ab = subprocess.check_output(
                 ["git", "-C", cwd, "rev-list", "--left-right", "--count", "HEAD...@{u}"],
@@ -1225,41 +1242,82 @@ def load_agy_quota(model_name: str, data: dict[str, Any], allow_bg_refresh: bool
     return out
 
 
-def load_external_usage(config: dict[str, Any], now: float) -> dict[str, Any] | None:
-    display = config.get("display", {})
-    if not display.get("showExternalUsage", True):
+THIRD_PARTY_MODEL_RE = re.compile(r"(?:claude|gpt|anthropic|openai|\bo1\b|\bo3\b|3p)", re.IGNORECASE)
+
+
+def is_third_party_model(model_id: str = "", model_name: str = "") -> bool:
+    return bool(THIRD_PARTY_MODEL_RE.search(f"{model_id} {model_name}"))
+
+
+def _parse_quota_bucket(bucket: Any, now: float) -> dict[str, Any] | None:
+    if not isinstance(bucket, dict):
         return None
-    raw_path = str(display.get("externalUsagePath") or "").strip()
-    if not raw_path:
-        return None
-    path = Path(os.path.expanduser(raw_path))
-    parsed = _read_json_file(path)
-    if not parsed:
-        return None
-    updated_ts = parse_iso_timestamp(parsed.get("updated_at"))
-    if updated_ts is None:
-        return None
-    freshness_s = float(display.get("externalUsageFreshnessMs", 600000)) / 1000.0
-    if now - updated_ts > freshness_s:
+    rem_pct: float | None = None
+    if bucket.get("remaining_fraction") is not None:
+        try:
+            rf = float(bucket["remaining_fraction"])
+            if rf >= 0.0:
+                rem_pct = max(0.0, min(100.0, rf * 100.0))
+        except (TypeError, ValueError):
+            rem_pct = None
+    elif bucket.get("remaining_percentage") is not None:
+        try:
+            rp = float(bucket["remaining_percentage"])
+            if rp >= 0.0:
+                rem_pct = max(0.0, min(100.0, rp))
+        except (TypeError, ValueError):
+            rem_pct = None
+
+    if rem_pct is None:
         return None
 
-    five_h = parsed.get("five_hour") if isinstance(parsed.get("five_hour"), dict) else {}
-    seven_d = parsed.get("seven_day") if isinstance(parsed.get("seven_day"), dict) else {}
-    five_pct = five_h.get("used_percentage")
-    seven_pct = seven_d.get("used_percentage")
-    five_reset = parse_iso_timestamp(five_h.get("resets_at"))
-    seven_reset = parse_iso_timestamp(seven_d.get("resets_at"))
-    label_str = str(parsed.get("balance_label") or "").strip()
+    reset_str = ""
+    reset_secs = bucket.get("reset_in_seconds")
+    if isinstance(reset_secs, (int, float)) and reset_secs > 0:
+        reset_str = format_reset_countdown(now + float(reset_secs), now)
+    else:
+        for key in ("reset_time", "resets_at"):
+            ts = parse_iso_timestamp(bucket.get(key))
+            if ts is not None:
+                reset_str = format_reset_countdown(ts, now)
+                break
 
-    if five_pct is None and seven_pct is None and not label_str:
-        return None
     return {
-        "five_hour": int(round(float(five_pct))) if isinstance(five_pct, (int, float)) else None,
-        "five_hour_reset": five_reset,
-        "seven_day": int(round(float(seven_pct))) if isinstance(seven_pct, (int, float)) else None,
-        "seven_day_reset": seven_reset,
-        "balance_label": label_str,
+        "remaining_percentage": rem_pct,
+        "refreshes_in": reset_str,
     }
+
+
+def parse_stdin_quota_pools(data: dict[str, Any], now: float) -> dict[str, dict[str, dict[str, Any]]]:
+    """Parse AGY's native dual quota pools (gemini and 3p) from stdin.quota."""
+    quota = data.get("quota")
+    if not isinstance(quota, dict):
+        return {}
+
+    pools: dict[str, dict[str, dict[str, Any]]] = {}
+    mapping = {
+        "gemini": (("5h", "gemini-5h"), ("7d", "gemini-weekly")),
+        "3p": (("5h", "3p-5h"), ("7d", "3p-weekly")),
+    }
+    for pool_key, buckets in mapping.items():
+        pool_data: dict[str, dict[str, Any]] = {}
+        for short_key, raw_key in buckets:
+            parsed = _parse_quota_bucket(quota.get(raw_key), now)
+            if parsed is not None:
+                pool_data[short_key] = parsed
+        if pool_data:
+            pools[pool_key] = pool_data
+    return pools
+
+
+def render_quota_mini_bar(pct: float, is_remaining: bool, colors: dict[str, Any], width: int = 6) -> str:
+    safe_pct = max(0.0, min(100.0, float(pct)))
+    filled = round((safe_pct / 100.0) * width)
+    empty = max(0, width - filled)
+    filled_ch = str(colors.get("barFilled") or "█")
+    empty_ch = str(colors.get("barEmpty") or "░")
+    ansi = quota_remaining_ansi(safe_pct, colors) if is_remaining else quota_used_ansi(safe_pct, colors)
+    return f"{ansi}{filled_ch * filled}{DIM}{empty_ch * empty}{RESET}"
 
 
 def write_status_state(data: dict[str, Any]) -> None:
@@ -1337,8 +1395,10 @@ def render_project_line(
         parts.append(git_seg)
 
     # 3. Optional sandbox badge
-    if display.get("showSandbox", True) and (data.get("sandbox") or {}).get("enabled"):
-        parts.append(colorize("[sandbox]", ORANGE))
+    sandbox_info = data.get("sandbox") or {}
+    if display.get("showSandbox", True) and sandbox_info.get("enabled"):
+        sb_text = "[sandbox:net]" if sandbox_info.get("allow_network") else "[sandbox]"
+        parts.append(colorize(sb_text, ORANGE))
 
     # 4. Optional non-idle agent state
     if display.get("showAgentState", False):
@@ -1367,12 +1427,14 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     colors = config["colors"]
     cw = data.get("context_window") or {}
 
-    if "used_percentage" in cw and cw["used_percentage"] is not None:
+    if cw.get("used_percentage") is not None:
         used_pct = max(0.0, min(100.0, float(cw["used_percentage"])))
-    elif "remaining_percentage" in cw and cw["remaining_percentage"] is not None:
+    elif cw.get("remaining_percentage") is not None:
         used_pct = max(0.0, min(100.0, 100.0 - float(cw["remaining_percentage"])))
     else:
-        used_pct = 0.0
+        ctx_limit = float(cw.get("context_window_size") or 0)
+        raw_total = float(cw.get("total_tokens") or cw.get("total_input_tokens") or 0)
+        used_pct = max(0.0, min(100.0, (raw_total / ctx_limit) * 100.0)) if (ctx_limit > 0 and raw_total > 0) else 0.0
 
     val_ansi = context_ansi(used_pct, display, colors)
     ctx_val_mode = display.get("contextValue", "percent")
@@ -1391,8 +1453,9 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
 
     crit = float(display.get("contextCriticalThreshold", 85))
     if display.get("showTokenBreakdown", True) and used_pct >= crit:
-        in_t = int(cw.get("total_input_tokens") or transcript.get("total_input_tokens") or 0)
-        out_t = int(cw.get("total_output_tokens") or transcript.get("total_output_tokens") or 0)
+        cur = cw.get("current_usage") if isinstance(cw.get("current_usage"), dict) else {}
+        in_t = int(cur.get("input_tokens") or cw.get("total_input_tokens") or transcript.get("total_input_tokens") or 0)
+        out_t = int(cur.get("output_tokens") or cw.get("total_output_tokens") or transcript.get("total_output_tokens") or 0)
         if in_t or out_t:
             seg += c_label(
                 f" ({tr(config, 'format.in')}: {format_tokens(in_t)}, {tr(config, 'format.out')}: {format_tokens(out_t)})",
@@ -1401,74 +1464,113 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     return seg
 
 
+def _format_pool_string(
+    pool_label: str,
+    pool_data: dict[str, dict[str, Any]],
+    *,
+    is_active: bool,
+    mode: str,
+    show_bars: bool,
+    colors: dict[str, Any],
+) -> str:
+    is_remaining = mode != "used"
+    lbl = colorize(pool_label, resolve_ansi(colors.get("model"), CYAN)) if is_active else c_label(pool_label, colors)
+    buckets: list[str] = []
+    for bucket_name in ("5h", "7d"):
+        info = pool_data.get(bucket_name)
+        if not info:
+            continue
+        rem = float(info["remaining_percentage"])
+        if is_remaining:
+            pct_val = max(0, min(100, round(rem)))
+            ansi = quota_remaining_ansi(rem, colors)
+        else:
+            pct_val = max(0, min(100, round(100.0 - rem)))
+            ansi = quota_used_ansi(pct_val, colors)
+        bar_str = f"{render_quota_mini_bar(pct_val, is_remaining, colors)} " if show_bars else ""
+        rst = str(info.get("refreshes_in") or "")
+        s = f"{c_label(f'{bucket_name}:', colors)} {bar_str}{ansi}{pct_val}%{RESET}"
+        if rst:
+            s += f" {c_label(f'({rst})', colors)}"
+        buckets.append(s)
+    return f"{lbl} {' | '.join(buckets)}" if buckets else ""
+
+
 def render_usage_segment(
     data: dict[str, Any],
-    agy_quota: dict[str, Any],
-    ext_usage: dict[str, Any] | None,
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+    agy_quota_fallback: dict[str, Any],
     config: dict[str, Any],
-    now: float,
 ) -> str:
     display = config["display"]
     colors = config["colors"]
     if not display.get("showUsage", True):
         return ""
 
-    parts: list[str] = []
+    mode = str(display.get("usageValue", "remaining"))
+    show_bars = bool(display.get("showQuotaBars", False))
+    pool_mode = str(display.get("quotaPools", "both")).lower()
 
-    # 1. AGY native model quota
-    if "remaining_percentage" in agy_quota:
-        rem = float(agy_quota["remaining_percentage"])
-        mode = display.get("usageValue", "remaining")
+    model_info = data.get("model", {})
+    if isinstance(model_info, dict):
+        raw_name = str(model_info.get("display_name") or "")
+        model_id = str(model_info.get("id") or "")
+    else:
+        raw_name = str(model_info or "")
+        model_id = ""
+
+    active_key = "3p" if is_third_party_model(model_id, raw_name) else "gemini"
+    secondary_key = "gemini" if active_key == "3p" else "3p"
+
+    segments: list[str] = []
+
+    if stdin_pools:
+        if pool_mode == "active":
+            chosen = [active_key] if stdin_pools.get(active_key) else ([secondary_key] if stdin_pools.get(secondary_key) else [])
+        else:
+            chosen = [k for k in (active_key, secondary_key) if stdin_pools.get(k)]
+
+        for k in chosen:
+            label_text = "Gemini" if k == "gemini" else "3P"
+            formatted = _format_pool_string(
+                label_text,
+                stdin_pools[k],
+                is_active=(k == active_key),
+                mode=mode,
+                show_bars=show_bars,
+                colors=colors,
+            )
+            if formatted:
+                segments.append(formatted)
+    elif "remaining_percentage" in agy_quota_fallback:
+        rem = float(agy_quota_fallback["remaining_percentage"])
         if mode == "used":
             pct_val = max(0, min(100, round(100.0 - rem)))
             ansi = quota_used_ansi(pct_val, colors)
             tag = "AGY:"
         else:
             pct_val = max(0, min(100, round(rem)))
-            ansi = quota_remaining_ansi(pct_val, colors)
+            ansi = quota_remaining_ansi(rem, colors)
             tag = "AGY余:"
-        reset_in = str(agy_quota.get("refreshes_in") or "")
+        reset_in = str(agy_quota_fallback.get("refreshes_in") or "")
         q_txt = f"{c_label(tag, colors)} {ansi}{pct_val}%{RESET}"
         if reset_in:
             q_txt += f" {c_label(f'({reset_in})', colors)}"
-        parts.append(q_txt)
+        segments.append(q_txt)
 
-    if display.get("showPlanTier", True) and data.get("plan_tier") and not ext_usage:
+    if not segments and display.get("showPlanTier", True) and data.get("plan_tier"):
         plan_short = shorten_plan_tier(str(data["plan_tier"]))
         if plan_short:
-            parts.append(c_label(plan_short, colors))
+            segments.append(c_label(plan_short, colors))
 
-    # 2. External Codex usage (exact claude-hud compact style)
-    if ext_usage:
-        seven_thresh = float(display.get("sevenDayThreshold", 0))
-        five_pct = ext_usage.get("five_hour")
-        seven_pct = ext_usage.get("seven_day")
-        if five_pct is not None:
-            ansi = quota_used_ansi(five_pct, colors)
-            rst = format_reset_countdown(ext_usage.get("five_hour_reset"), now)
-            s = f"{c_label('5h:', colors)} {ansi}{five_pct}%{RESET}"
-            if rst:
-                s += f" {c_label(f'({rst})', colors)}"
-            parts.append(s)
-        if seven_pct is not None and (five_pct is None or seven_pct >= seven_thresh):
-            ansi = quota_used_ansi(seven_pct, colors)
-            rst = format_reset_countdown(ext_usage.get("seven_day_reset"), now)
-            s = f"{c_label('7d:', colors)} {ansi}{seven_pct}%{RESET}"
-            if rst:
-                s += f" {c_label(f'({rst})', colors)}"
-            parts.append(s)
-        if ext_usage.get("balance_label"):
-            parts.append(c_label(str(ext_usage["balance_label"]), colors))
-
-    # 3. Optional session token totals
     if display.get("showSessionTokens", False):
         cw = data.get("context_window") or {}
         in_t = int(cw.get("total_input_tokens") or 0)
         out_t = int(cw.get("total_output_tokens") or 0)
         if in_t or out_t:
-            parts.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
+            segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
 
-    return " | ".join(parts)
+    return " │ ".join(segments)
 
 
 def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> str:
@@ -1595,14 +1697,22 @@ def render_hud(
 
     tp = resolve_transcript_path(data)
     transcript = parse_agy_transcript(tp, agent_state=agent_state)
-    git_status = get_git_status(cwd, cfg.get("gitStatus", {}))
+    git_status = get_git_status(cwd, cfg.get("gitStatus", {}), data=data)
     counts = count_agy_configs(cwd)
-    agy_quota = load_agy_quota(raw_model or transcript.get("last_model", ""), data, allow_bg_refresh=allow_bg_refresh)
-    ext_usage = load_external_usage(cfg, now_ts)
+    stdin_pools = parse_stdin_quota_pools(data, now_ts)
+    agy_quota_fallback = (
+        {}
+        if stdin_pools
+        else load_agy_quota(
+            raw_model or transcript.get("last_model", ""),
+            data,
+            allow_bg_refresh=bool(allow_bg_refresh and cfg["display"].get("fallbackLocalServerQuota", False)),
+        )
+    )
 
     line1 = render_project_line(data, transcript, git_status, cfg, now_ts)
     ctx_seg = render_context_segment(data, transcript, cfg)
-    usage_seg = render_usage_segment(data, agy_quota, ext_usage, cfg, now_ts)
+    usage_seg = render_usage_segment(data, stdin_pools, agy_quota_fallback, cfg)
     line2 = f"{ctx_seg} │ {usage_seg}" if (ctx_seg and usage_seg) else (ctx_seg or usage_seg)
     line3 = render_environment_line(counts, cfg)
     line4 = render_tools_line(transcript, cfg)
@@ -1624,7 +1734,7 @@ def render_hud(
         raw_lines.append(c_label("─" * sep_w, cfg["colors"]))
     raw_lines.extend(activity_lines)
 
-    term_w = get_terminal_width(cfg)
+    term_w = get_terminal_width(cfg, data=data)
     final_lines: list[str] = []
     for ln in raw_lines:
         for sub in ln.split("\n"):
@@ -1708,7 +1818,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     data, idx = decoder.raw_decode(stripped)
                     buf = stripped[idx:]
-                    if isinstance(data, dict) and ("model" in data or "cwd" in data or "context_window" in data):
+                    if isinstance(data, dict) and any(k in data for k in ("model", "cwd", "context_window", "quota", "agent_state")):
                         write_status_state(data)
                         print(render_hud(data, config), flush=True)
                         rendered_any = True
