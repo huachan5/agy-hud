@@ -191,6 +191,12 @@ DEFAULT_CONFIG: dict[str, Any] = {
 
 # ── Config & i18n ──────────────────────────────────────────────────────────────
 
+def _no_window_kwargs() -> dict[str, Any]:
+    if os.name == "nt":
+        return {"creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)}
+    return {}
+
+
 def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
     out = dict(base)
     for k, v in override.items():
@@ -500,6 +506,7 @@ def get_git_status(
                 errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=0.4,
+                **_no_window_kwargs(),
             ).strip()
         except Exception:
             return None
@@ -515,6 +522,7 @@ def get_git_status(
                     errors="replace",
                     stderr=subprocess.DEVNULL,
                     timeout=0.4,
+                    **_no_window_kwargs(),
                 ).strip()
                 dirty = bool(porcelain)
             except Exception:
@@ -531,6 +539,7 @@ def get_git_status(
                 errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=0.4,
+                **_no_window_kwargs(),
             ).strip()
             parts = ab.split()
             if len(parts) == 2:
@@ -981,6 +990,7 @@ def _find_server_candidates() -> list[dict[str, Any]]:
                 errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=3.0,
+                **_no_window_kwargs(),
             )
         except Exception:
             return []
@@ -1024,6 +1034,7 @@ def _get_listening_ports(pid: int) -> list[int]:
                 errors="replace",
                 stderr=subprocess.DEVNULL,
                 timeout=2.0,
+                **_no_window_kwargs(),
             )
         except Exception:
             return []
@@ -1185,10 +1196,7 @@ def _spawn_background_quota_refresh(expected_email: str) -> None:
         "stderr": subprocess.DEVNULL,
     }
     if os.name == "nt":
-        kwargs["creationflags"] = (
-            getattr(subprocess, "CREATE_NO_WINDOW", 0)
-            | getattr(subprocess, "DETACHED_PROCESS", 0)
-        )
+        kwargs.update(_no_window_kwargs())
     else:
         kwargs["start_new_session"] = True
     try:

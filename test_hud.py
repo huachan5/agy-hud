@@ -188,6 +188,13 @@ class TestAgyHud(unittest.TestCase):
             self.assertEqual(len(parsed["tools"]), 1)
             self.assertEqual(parsed["tools"][0]["status"], "completed")
 
+    def test_no_window_suppression_on_windows(self):
+        kwargs = hud._no_window_kwargs()
+        if sys.platform == "win32":
+            self.assertEqual(kwargs, {"creationflags": subprocess.CREATE_NO_WINDOW})
+        src = (HUD_DIR / "hud.py").read_text(encoding="utf-8")
+        self.assertNotIn("DETACHED_PROCESS", src)
+
 
 if __name__ == "__main__":
     unittest.main()
