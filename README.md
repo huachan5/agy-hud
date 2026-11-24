@@ -28,3 +28,15 @@
 ```
 
 安装后重启 `agy` 即可生效。配置文件位于 `~/.antigravity/agy-hud/config.json`，可随时按需开关各模块。
+
+## 隐私与遥测（Telemetry）提示
+
+- `agy-hud` 本身是纯本地脚本，不上传任何数据到云端，也不会在 Windows 上弹出黑框窗口。
+- 如需关闭 Antigravity CLI（`agy`）自身的遥测/产品改进数据上报：在 `agy` 中输入 `/settings`（或 `/config`），将 **Enable Telemetry** 切换为关闭即可。
+- 在 PowerShell 中可快速自查是否已关闭：
+
+```powershell
+Select-String -Path "$env:USERPROFILE\.gemini\antigravity-cli\settings.json" -Pattern "telemetry"
+```
+
+看到 `"enableTelemetry": false` 即表示关闭成功（不影响正常对话、改代码与状态栏功能）。
