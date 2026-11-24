@@ -48,6 +48,9 @@ STATUS_STATE_FILE = Path(
 SESSION_STARTS_FILE = Path(
     os.environ.get("AGY_HUD_SESSIONS", str(DEFAULT_HUD_DIR / "session-starts.json"))
 )
+SUBAGENT_STATE_FILE = Path(
+    os.environ.get("AGY_HUD_SUBAGENT_STATE", str(DEFAULT_HUD_DIR / "subagent-state.json"))
+)
 QUOTA_LOCK_FILE = Path(
     os.environ.get("AGY_QUOTA_LOCK", str(DEFAULT_HUD_DIR / "quota-refresh.lock"))
 )
@@ -118,6 +121,7 @@ I18N: dict[str, dict[str, str]] = {
         "format.in": "输入",
         "format.out": "输出",
         "format.cache": "缓存",
+        "status.allTodosComplete": "所有任务已完成",
         "init.initializing": "[agy-hud] 正在初始化...",
     },
     "en": {
@@ -129,6 +133,7 @@ I18N: dict[str, dict[str, str]] = {
         "format.in": "in",
         "format.out": "out",
         "format.cache": "cache",
+        "status.allTodosComplete": "All todos complete",
         "init.initializing": "[agy-hud] Initializing...",
     },
 }
@@ -143,12 +148,14 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "enabled": True,
         "showDirty": True,
         "showAheadBehind": False,
+        "showFileStats": True,
     },
     "display": {
         "showModel": True,
         "showEffortLevel": True,
         "effortFormat": "full",
         "showProject": True,
+        "showSessionName": True,
         "showSandbox": True,
         "showAgentState": False,
         "showDuration": True,
@@ -170,6 +177,8 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "toolsMaxVisible": 4,
         "toolNameMaxLength": 0,
         "showAgents": True,
+        "agentCompletedRetentionSeconds": 60,
+        "showTodos": True,
         "showSessionTokens": False,
     },
     "colors": {
@@ -475,7 +484,132 @@ def shorten_plan_tier(plan_tier: str) -> str:
     return s
 
 
+def _sanitize_text(value: Any, max_len: int = 0) -> str:
+    """Strip ANSI/control chars, collapse whitespace, and optionally truncate."""
+    if value is None:
+        return ""
+    s = ANSI_RE.sub("", str(value))
+    s = re.sub(r"[\x00-\x1f\x7f-\x9f]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    if max_len > 0 and len(s) > max_len:
+        return s[: max(1, max_len - 1)].rstrip() + "…"
+    return s
+
+
+def format_agent_model(model: str) -> str:
+    """Compact an agent model ID into a short statusline-friendly badge."""
+    cleaned = _sanitize_text(model)
+    if not cleaned or cleaned.lower() == "inherit":
+        return ""
+
+    candidate = re.sub(r"\[[^\]]*\]$", "", cleaned).strip()
+    m_cur = re.fullmatch(
+        r"claude-(opus|sonnet|haiku)-(\d+)(?:-(\d+))?(?:-\d{8})?",
+        candidate,
+        re.IGNORECASE,
+    )
+    if m_cur:
+        family, major, minor = m_cur.groups()
+        return f"{family.lower()}-{major}.{minor}" if minor else f"{family.lower()}-{major}"
+
+    m_leg = re.fullmatch(
+        r"claude-(\d+)(?:-(\d+))?-(opus|sonnet|haiku)(?:-\d{8})?",
+        candidate,
+        re.IGNORECASE,
+    )
+    if m_leg:
+        major, minor, family = m_leg.groups()
+        return f"{family.lower()}-{major}.{minor}" if minor else f"{family.lower()}-{major}"
+
+    if candidate.lower() == "claude-":
+        return ""
+
+    # Strip trailing date and effort suffixes on Gemini / general model IDs
+    shortened = re.sub(r"-\d{8}$", "", candidate)
+    shortened = re.sub(r"\s*\((?:low|medium|high|xhigh|max)\)\s*$", "", shortened, flags=re.IGNORECASE)
+    shortened = re.sub(r"-(?:low|medium|high|xhigh|max)$", "", shortened, flags=re.IGNORECASE)
+    return shortened.strip() or cleaned
+
+
+def _extract_prompt_summary(prompt: str, max_len: int = 40) -> str:
+    """Return a clean one-line summary from a subagent prompt or brief."""
+    if not isinstance(prompt, str) or not prompt.strip():
+        return ""
+    for raw_line in prompt.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        # Strip leading markdown headings, blockquotes, list bullets, or task boxes
+        while True:
+            updated = re.sub(r"^(?:[#>*+-]+|\d+[.)]|\[[ xX/]\])\s*", "", line).strip()
+            if updated == line:
+                break
+            line = updated
+        if line:
+            return _sanitize_text(line, max_len)
+    return ""
+
+
+def _find_brain_dir(data: dict[str, Any], transcript_path: Path | None) -> Path | None:
+    """Locate the AGY brain directory for the active conversation."""
+    if (
+        transcript_path is not None
+        and len(transcript_path.parents) >= 3
+        and transcript_path.parent.name == "logs"
+        and transcript_path.parents[1].name == ".system_generated"
+    ):
+        return transcript_path.parents[2]
+
+    conv_id = str(data.get("conversation_id") or data.get("session_id") or "").strip()
+    if not conv_id:
+        return None
+    for app_dir in ("antigravity-cli", "antigravity", "antigravity-ide"):
+        candidate = HOME_DIR / ".gemini" / app_dir / "brain" / conv_id
+        if candidate.is_dir():
+            return candidate
+    return None
+
+
+def _resolve_child_transcript_path(conv_id: str, parent_transcript: Path | None) -> Path | None:
+    """Locate a subagent's transcript.jsonl by conversation ID."""
+    cid = (conv_id or "").strip()
+    if not cid:
+        return None
+    if (
+        parent_transcript is not None
+        and len(parent_transcript.parents) >= 4
+        and parent_transcript.parent.name == "logs"
+        and parent_transcript.parents[1].name == ".system_generated"
+    ):
+        sibling = parent_transcript.parents[3] / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if sibling.is_file():
+            return sibling
+
+    for app_dir in ("antigravity-cli", "antigravity", "antigravity-ide"):
+        candidate = HOME_DIR / ".gemini" / app_dir / "brain" / cid / ".system_generated" / "logs" / "transcript.jsonl"
+        if candidate.is_file():
+            return candidate
+    return None
+
+
 # ── Git Status ─────────────────────────────────────────────────────────────────
+
+def _parse_porcelain_file_stats(porcelain: str) -> dict[str, int]:
+    stats = {"modified": 0, "added": 0, "deleted": 0, "untracked": 0}
+    for line in porcelain.splitlines():
+        if len(line) < 2:
+            continue
+        index_ch, work_ch = line[0], line[1]
+        if line.startswith("??"):
+            stats["untracked"] += 1
+        elif index_ch == "A":
+            stats["added"] += 1
+        elif index_ch == "D" or work_ch == "D":
+            stats["deleted"] += 1
+        elif index_ch in ("M", "R", "C") or work_ch == "M":
+            stats["modified"] += 1
+    return stats
+
 
 def get_git_status(
     cwd: str,
@@ -485,7 +619,9 @@ def get_git_status(
     if not git_cfg.get("enabled", True):
         return None
 
-    # Fast path: use native AGY stdin.vcs when provided
+    show_file_stats = bool(git_cfg.get("showFileStats", True))
+
+    # Fast path: use native AGY stdin.vcs when provided (unless file stats are requested)
     vcs = data.get("vcs") if isinstance(data, dict) else None
     branch_out = ""
     dirty = False
@@ -513,20 +649,38 @@ def get_git_status(
         if not branch_out:
             return None
 
-        if git_cfg.get("showDirty", True):
-            try:
-                porcelain = subprocess.check_output(
-                    ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
-                    text=True,
-                    encoding="utf-8",
-                    errors="replace",
-                    stderr=subprocess.DEVNULL,
-                    timeout=0.4,
-                    **_no_window_kwargs(),
-                ).strip()
-                dirty = bool(porcelain)
-            except Exception:
-                dirty = False
+    file_stats: dict[str, int] | None = None
+    if show_file_stats and cwd and os.path.isdir(cwd):
+        try:
+            porcelain = subprocess.check_output(
+                ["git", "-C", cwd, "-c", "core.quotePath=false", "--no-optional-locks", "status", "--porcelain"],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stderr=subprocess.DEVNULL,
+                timeout=0.4,
+                **_no_window_kwargs(),
+            )
+            if porcelain.strip():
+                file_stats = _parse_porcelain_file_stats(porcelain)
+                if git_cfg.get("showDirty", True) and any(file_stats.values()):
+                    dirty = True
+        except Exception:
+            file_stats = None
+    elif not used_vcs_fast_path and git_cfg.get("showDirty", True):
+        try:
+            porcelain = subprocess.check_output(
+                ["git", "-C", cwd, "status", "--porcelain", "--untracked-files=no"],
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                stderr=subprocess.DEVNULL,
+                timeout=0.4,
+                **_no_window_kwargs(),
+            ).strip()
+            dirty = bool(porcelain)
+        except Exception:
+            dirty = False
 
     ahead = 0
     behind = 0
@@ -547,7 +701,13 @@ def get_git_status(
         except Exception:
             pass
 
-    return {"branch": branch_out, "dirty": dirty, "ahead": ahead, "behind": behind}
+    return {
+        "branch": branch_out,
+        "dirty": dirty,
+        "ahead": ahead,
+        "behind": behind,
+        "file_stats": file_stats,
+    }
 
 
 # ── AGY Environment Config Counter ─────────────────────────────────────────────
@@ -776,19 +936,22 @@ def _extract_tool_target(name: str, args: dict[str, Any]) -> str:
     return ""
 
 
-def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle") -> dict[str, Any]:
-    result: dict[str, Any] = {
-        "session_start": None,
-        "tools": [],
-        "agents": [],
-        "last_model": "",
-        "total_input_tokens": 0,
-        "total_cache_read_tokens": 0,
-        "total_output_tokens": 0,
-    }
-    if not transcript_path or not transcript_path.is_file():
-        return result
+UUID_RE = re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}", re.IGNORECASE)
+CONV_ID_RE = re.compile(
+    r"(?:conversation[_-]?id|conversationId)[\"'=:\s]+([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})",
+    re.IGNORECASE,
+)
 
+RUNNING_SUBAGENT_STATUSES = {
+    "running", "working", "active", "in_progress", "waiting", "tool_use", "reviewing", "initializing", "pending",
+}
+ERROR_SUBAGENT_STATUSES = {"error", "failed"}
+COMPLETED_SUBAGENT_STATUSES = {"completed", "done", "finished", "killed", "cancelled", "canceled", "stopped"}
+
+
+def _read_dedup_transcript_entries(transcript_path: Path | None) -> list[dict[str, Any]]:
+    if not transcript_path or not transcript_path.is_file():
+        return []
     raw_entries: list[dict[str, Any]] = []
     try:
         with transcript_path.open("r", encoding="utf-8", errors="replace") as f:
@@ -803,12 +966,11 @@ def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle"
                 except json.JSONDecodeError:
                     continue
     except Exception:
-        return result
+        return []
 
     if not raw_entries:
-        return result
+        return []
 
-    # Deduplicate by step_index (keeping latest) while preserving order
     entries: list[dict[str, Any]] = []
     idx_pos: dict[int, int] = {}
     for obj in raw_entries:
@@ -821,34 +983,214 @@ def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle"
                 entries.append(obj)
         else:
             entries.append(obj)
+    return entries
 
-    # Collect background task step_indices that later finished or were canceled
+
+def _inspect_subagent_transcript(conv_id: str, parent_transcript: Path | None) -> dict[str, Any]:
+    child_path = _resolve_child_transcript_path(conv_id, parent_transcript)
+    entries = _read_dedup_transcript_entries(child_path)
+    if not entries:
+        return {}
+
+    start_ts: float | None = None
+    last_ts: float | None = None
+    model = ""
+    last_pr_idx: int | None = None
+
+    for idx, entry in enumerate(entries):
+        ts = parse_iso_timestamp(entry.get("created_at"))
+        if ts is not None:
+            if start_ts is None:
+                start_ts = ts
+            last_ts = ts
+        if entry.get("type") == "PLANNER_RESPONSE":
+            last_pr_idx = idx
+            if entry.get("model"):
+                model = str(entry["model"])
+
+    active_tool = ""
+    child_done = False
+    end_ts: float | None = None
+
+    if last_pr_idx is not None:
+        last_pr = entries[last_pr_idx]
+        tail = entries[last_pr_idx + 1 :]
+        has_later_user = any(e.get("type") == "USER_INPUT" for e in tail)
+        tool_calls = last_pr.get("tool_calls") or []
+        if isinstance(tool_calls, list) and tool_calls:
+            result_steps = [
+                e for e in tail if e.get("source") == "MODEL" and e.get("type") != "PLANNER_RESPONSE"
+            ]
+            chosen_tc: dict[str, Any] | None = None
+            for tc_idx, tc in enumerate(tool_calls):
+                if not isinstance(tc, dict):
+                    continue
+                if tc_idx >= len(result_steps) or str(result_steps[tc_idx].get("status") or "").upper() == "RUNNING":
+                    chosen_tc = tc
+            if chosen_tc is None and isinstance(tool_calls[-1], dict):
+                chosen_tc = tool_calls[-1]
+            if chosen_tc is not None:
+                tname_raw = str(chosen_tc.get("name") or "").strip()
+                if tname_raw:
+                    tname = _format_tool_name(tname_raw, {"friendlyToolNames": True})
+                    targs = chosen_tc.get("args") if isinstance(chosen_tc.get("args"), dict) else {}
+                    ttarget = _extract_tool_target(tname_raw, targs)
+                    active_tool = f"{tname}: {ttarget}" if ttarget else tname
+            child_done = False
+        elif str(last_pr.get("status") or "").upper() == "DONE" and not has_later_user:
+            child_done = True
+            end_ts = last_ts or parse_iso_timestamp(last_pr.get("created_at"))
+
+    return {
+        "model": model,
+        "start_ts": start_ts,
+        "last_ts": last_ts,
+        "active_tool": active_tool,
+        "child_done": child_done,
+        "end_ts": end_ts,
+    }
+
+
+def _extract_conv_id_from_text(text: str) -> str:
+    if not text:
+        return ""
+    m = CONV_ID_RE.search(text)
+    if m:
+        return m.group(1)
+    m2 = UUID_RE.search(text)
+    return m2.group(0) if m2 else ""
+
+
+def _parse_conv_id_list(val: Any) -> list[str]:
+    if isinstance(val, list):
+        return [str(x).strip() for x in val if str(x).strip()]
+    if isinstance(val, str):
+        s = _clean_arg_value(val)
+        if s.startswith("["):
+            try:
+                loaded = json.loads(s)
+                if isinstance(loaded, list):
+                    return [str(x).strip() for x in loaded if str(x).strip()]
+            except Exception:
+                pass
+        return UUID_RE.findall(s)
+    return []
+
+
+def _normalize_todo_items(raw_todos: Any) -> list[dict[str, str]]:
+    if not isinstance(raw_todos, list):
+        return []
+    out: list[dict[str, str]] = []
+    for item in raw_todos:
+        if not isinstance(item, dict):
+            continue
+        content = _sanitize_text(item.get("content") or item.get("subject") or "")
+        if not content:
+            continue
+        st = str(item.get("status") or "pending").lower()
+        if st in ("completed", "complete", "done"):
+            norm_st = "completed"
+        elif st in ("in_progress", "running"):
+            norm_st = "in_progress"
+        else:
+            norm_st = "pending"
+        out.append({"content": content, "status": norm_st})
+    return out
+
+
+def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle") -> dict[str, Any]:
+    result: dict[str, Any] = {
+        "session_start": None,
+        "session_title": "",
+        "tools": [],
+        "agents": [],
+        "todos": [],
+        "last_model": "",
+        "total_input_tokens": 0,
+        "total_cache_read_tokens": 0,
+        "total_output_tokens": 0,
+    }
+    entries = _read_dedup_transcript_entries(transcript_path)
+    if not entries:
+        return result
+
+    entry_idx_by_obj_id = {id(e): i for i, e in enumerate(entries)}
+
+    # Pre-scan lifecycle events: background task completions, subagent kills, replies, titles, TodoWrite
     finished_task_steps: set[int] = set()
-    for entry in entries:
+    killed_conv_ids: dict[str, float] = {}
+    kill_all_ts: list[float] = []
+    killed_swarm_names: dict[str, float] = {}
+    reply_events: list[tuple[int, float, str]] = []
+    fallback_todos: list[dict[str, str]] = []
+
+    for idx, entry in enumerate(entries):
+        ts = parse_iso_timestamp(entry.get("created_at"))
+        if ts is not None and result["session_start"] is None:
+            result["session_start"] = ts
+
+        # Session title from transcript if emitted
+        for tkey in ("conversation_title", "custom_title", "customTitle"):
+            tval = entry.get(tkey)
+            if isinstance(tval, str) and tval.strip():
+                result["session_title"] = tval.strip()
+        if entry.get("type") in ("CUSTOM_TITLE", "SESSION_TITLE", "TITLE_UPDATE") and isinstance(entry.get("title"), str):
+            if entry["title"].strip():
+                result["session_title"] = entry["title"].strip()
+
         content = str(entry.get("content") or "")
-        if entry.get("type") == "SYSTEM_MESSAGE" or "task-" in content:
+        etype = str(entry.get("type") or "").upper()
+        if etype == "SYSTEM_MESSAGE" or "task-" in content:
             for m in re.finditer(
                 r"task-(\d+)[\"']?\s+(?:was canceled|completed|finished|exited|failed|terminated)",
                 content,
                 re.IGNORECASE,
             ):
                 finished_task_steps.add(int(m.group(1)))
-        if entry.get("type") == "PLANNER_RESPONSE":
+
+        from_cid = _clean_arg_value(entry.get("from_conversation_id") or entry.get("subagent_id") or "")
+        if from_cid and UUID_RE.fullmatch(from_cid):
+            reply_events.append((idx, ts or time.time(), from_cid.lower()))
+        elif etype in ("AGENT_MESSAGE", "SUBAGENT_MESSAGE") or (
+            etype in ("SYSTEM_MESSAGE", "USER_INPUT", "MESSAGE")
+            and etype != "PLANNER_RESPONSE"
+            and re.search(r"replied|completed|finished|returned|message from|subagent|回复|完成|结果", content, re.IGNORECASE)
+        ):
+            for u in UUID_RE.findall(content):
+                reply_events.append((idx, ts or time.time(), u.lower()))
+
+        if etype == "PLANNER_RESPONSE":
+            ev_ts = ts or time.time()
             for tc in entry.get("tool_calls") or []:
-                if isinstance(tc, dict) and tc.get("name") == "manage_task":
-                    args = tc.get("args") or {}
+                if not isinstance(tc, dict):
+                    continue
+                tc_name = str(tc.get("name") or "")
+                args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
+                if tc_name == "manage_task":
                     if _clean_arg_value(args.get("Action", "")).lower() == "kill":
                         tid = _clean_arg_value(args.get("TaskId", ""))
                         mk = re.search(r"task-(\d+)$", tid)
                         if mk:
                             finished_task_steps.add(int(mk.group(1)))
+                elif tc_name == "manage_subagents":
+                    act = _clean_arg_value(args.get("Action", "")).lower()
+                    if act == "kill_all":
+                        kill_all_ts.append(ev_ts)
+                    elif act == "kill":
+                        for cid in _parse_conv_id_list(args.get("ConversationIds")):
+                            killed_conv_ids[cid.lower()] = ev_ts
+                elif tc_name == "swarm":
+                    act = _clean_arg_value(args.get("action", "")).lower()
+                    if act == "kill":
+                        wname = _clean_arg_value(args.get("name", ""))
+                        if wname:
+                            killed_swarm_names[wname] = ev_ts
+                elif tc_name == "TodoWrite":
+                    parsed_td = _normalize_todo_items(args.get("todos"))
+                    if parsed_td:
+                        fallback_todos = parsed_td
 
-    # Session start from first entry with created_at
-    for entry in entries:
-        ts = parse_iso_timestamp(entry.get("created_at"))
-        if ts is not None:
-            result["session_start"] = ts
-            break
+    result["todos"] = fallback_todos
 
     # Walk entries to aggregate planner tool calls and match subsequent result steps
     planner_indices: list[int] = []
@@ -868,7 +1210,6 @@ def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle"
         next_p_idx = planner_indices[p_pos + 1] if p_pos + 1 < len(planner_indices) else len(entries)
         is_last_batch = p_pos == len(planner_indices) - 1
 
-        # Count tool result steps following this planner response
         result_steps = [
             e
             for e in entries[p_idx + 1 : next_p_idx]
@@ -885,17 +1226,18 @@ def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle"
             args = tc.get("args") if isinstance(tc.get("args"), dict) else {}
             target = _extract_tool_target(name, args)
 
+            launch_step: dict[str, Any] | None = None
             if tc_idx < len(result_steps):
-                step = result_steps[tc_idx]
-                st = str(step.get("status") or "DONE").upper()
-                step_idx = step.get("step_index")
+                launch_step = result_steps[tc_idx]
+                st = str(launch_step.get("status") or "DONE").upper()
+                step_idx = launch_step.get("step_index")
                 if st == "RUNNING" and step_idx not in finished_task_steps:
                     status = "running"
                 elif st == "ERROR":
                     status = "error"
                 else:
                     status = "completed"
-                end_ts = parse_iso_timestamp(step.get("created_at"))
+                end_ts = parse_iso_timestamp(launch_step.get("created_at"))
             elif is_last_batch and agent_state == "working":
                 status = "running"
                 end_ts = None
@@ -910,17 +1252,116 @@ def parse_agy_transcript(transcript_path: Path | None, agent_state: str = "idle"
             })
 
             if name == "invoke_subagent":
-                role = _clean_arg_value(args.get("Role", "")) or _clean_arg_value(args.get("TypeName", "")) or "subagent"
+                role_arg = _clean_arg_value(args.get("Role", ""))
+                type_arg = _clean_arg_value(args.get("TypeName", ""))
+                role = role_arg or type_arg or "subagent"
                 model_arg = _clean_arg_value(args.get("Model", ""))
-                agent_done = not is_last_batch or agent_state != "working"
+                prompt_arg = _clean_arg_value(args.get("Prompt", ""))
+                desc = _extract_prompt_summary(prompt_arg, 40)
+
+                step_content = str(launch_step.get("content") or "") if launch_step else ""
+                conv_id = _extract_conv_id_from_text(step_content)
+                launch_entry_idx = entry_idx_by_obj_id.get(id(launch_step), p_idx) if launch_step else p_idx
+
+                child_info = _inspect_subagent_transcript(conv_id, transcript_path) if conv_id else {}
+                resolved_model = (
+                    model_arg
+                    if (model_arg and model_arg.lower() != "inherit")
+                    else str(child_info.get("model") or "")
+                )
+
+                cid_lower = conv_id.lower() if conv_id else ""
+                kill_ts = killed_conv_ids.get(cid_lower) if cid_lower else None
+                later_kill_all = [kt for kt in kill_all_ts if kt >= start_ts]
+                if later_kill_all:
+                    ka = min(later_kill_all)
+                    kill_ts = ka if kill_ts is None else min(kill_ts, ka)
+
+                reply_ts: float | None = None
+                if cid_lower:
+                    for ev_idx, ev_ts, ev_cid in reply_events:
+                        if ev_cid == cid_lower and ev_idx > launch_entry_idx:
+                            reply_ts = ev_ts
+                            break
+
+                if kill_ts is not None:
+                    ag_status = "completed"
+                    ag_end_ts: float | None = kill_ts
+                elif reply_ts is not None:
+                    ag_status = "completed"
+                    ag_end_ts = reply_ts
+                elif child_info.get("child_done"):
+                    ag_status = "completed"
+                    ag_end_ts = child_info.get("end_ts") or child_info.get("last_ts") or start_ts
+                elif conv_id or (is_last_batch and agent_state == "working"):
+                    ag_status = "running"
+                    ag_end_ts = None
+                else:
+                    ag_status = "completed"
+                    ag_end_ts = end_ts or start_ts
+
                 result["agents"].append({
-                    "id": f"{p_idx}:{tc_idx}",
+                    "id": conv_id or f"{p_idx}:{tc_idx}",
+                    "conv_id": conv_id,
                     "role": role,
-                    "model": model_arg if model_arg and model_arg != "inherit" else "",
-                    "status": "completed" if agent_done else "running",
-                    "start_ts": start_ts,
-                    "end_ts": end_ts if agent_done else None,
+                    "type_name": type_arg,
+                    "model": resolved_model,
+                    "description": desc,
+                    "active_tool": str(child_info.get("active_tool") or ""),
+                    "child_end_ts": child_info.get("end_ts") if child_info.get("child_done") else None,
+                    "status": ag_status,
+                    "start_ts": child_info.get("start_ts") or start_ts,
+                    "end_ts": ag_end_ts,
+                    "source": "transcript",
                 })
+
+            elif name == "swarm" and _clean_arg_value(args.get("action", "")).lower() == "add":
+                w_base = _clean_arg_value(args.get("name", "")) or "worker"
+                w_model = _clean_arg_value(args.get("model", ""))
+                w_brief = _clean_arg_value(args.get("brief", ""))
+                raw_tasks = args.get("tasks")
+                if isinstance(raw_tasks, str):
+                    try:
+                        raw_tasks = json.loads(_clean_arg_value(raw_tasks))
+                    except Exception:
+                        raw_tasks = None
+                raw_n = args.get("n")
+                worker_specs: list[tuple[str, str]] = []
+                if isinstance(raw_tasks, list) and len(raw_tasks) > 0:
+                    for i, task_item in enumerate(raw_tasks):
+                        worker_specs.append((
+                            f"{w_base}-{i + 1}",
+                            _extract_prompt_summary(str(task_item) or w_brief, 40),
+                        ))
+                else:
+                    try:
+                        n_val = int(raw_n) if raw_n is not None else 1
+                    except (TypeError, ValueError):
+                        n_val = 1
+                    if n_val > 1:
+                        b_sum = _extract_prompt_summary(w_brief, 40)
+                        for i in range(n_val):
+                            worker_specs.append((f"{w_base}-{i + 1}", b_sum))
+                    else:
+                        worker_specs.append((w_base, _extract_prompt_summary(w_brief, 40)))
+
+                for w_idx, (w_name, w_desc) in enumerate(worker_specs):
+                    kill_ts = killed_swarm_names.get(w_name)
+                    is_killed = kill_ts is not None and kill_ts >= start_ts
+                    result["agents"].append({
+                        "id": f"swarm:{p_idx}:{tc_idx}:{w_idx}",
+                        "conv_id": "",
+                        "role": w_name,
+                        "type_name": "swarm",
+                        "model": w_model if (w_model and w_model.lower() != "inherit") else "",
+                        "description": w_desc,
+                        "active_tool": "",
+                        "child_last_ts": None,
+                        "status": "completed" if is_killed else "running",
+                        "start_ts": start_ts,
+                        "end_ts": kill_ts if is_killed else None,
+                        "source": "swarm",
+                    })
 
     return result
 
@@ -1393,6 +1834,16 @@ def render_project_line(
             inner.append(c_git_branch(f"↑{git_status['ahead']}", colors))
         if git_status.get("behind", 0) > 0:
             inner.append(c_git_branch(f"↓{git_status['behind']}", colors))
+        fs_stats = git_status.get("file_stats")
+        if isinstance(fs_stats, dict):
+            if fs_stats.get("modified", 0) > 0:
+                inner.append(colorize(f"!{fs_stats['modified']}", resolve_ansi(colors.get("warning"), YELLOW)))
+            if fs_stats.get("added", 0) > 0:
+                inner.append(colorize(f"+{fs_stats['added']}", resolve_ansi(colors.get("context"), GREEN)))
+            if fs_stats.get("deleted", 0) > 0:
+                inner.append(colorize(f"✘{fs_stats['deleted']}", resolve_ansi(colors.get("critical"), RED)))
+            if fs_stats.get("untracked", 0) > 0:
+                inner.append(c_label(f"?{fs_stats['untracked']}", colors))
         git_seg = f"{c_git('git:(', colors)}{' '.join(inner)}{c_git(')', colors)}"
 
     if project_seg and git_seg:
@@ -1401,6 +1852,19 @@ def render_project_line(
         parts.append(project_seg)
     elif git_seg:
         parts.append(git_seg)
+
+    # 2.5 Optional conversation / session title
+    if display.get("showSessionName", True):
+        raw_title = (
+            data.get("conversation_title")
+            or data.get("session_name")
+            or data.get("title")
+            or transcript.get("session_title")
+            or ""
+        )
+        title_clean = _sanitize_text(raw_title, 32)
+        if title_clean:
+            parts.append(c_label(title_clean, colors))
 
     # 3. Optional sandbox badge
     sandbox_info = data.get("sandbox") or {}
@@ -1445,9 +1909,29 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
         used_pct = max(0.0, min(100.0, (raw_total / ctx_limit) * 100.0)) if (ctx_limit > 0 and raw_total > 0) else 0.0
 
     val_ansi = context_ansi(used_pct, display, colors)
-    ctx_val_mode = display.get("contextValue", "percent")
+    ctx_val_mode = str(display.get("contextValue", "percent")).lower()
+    ctx_limit = int(cw.get("context_window_size") or 0)
+    cur = cw.get("current_usage") if isinstance(cw.get("current_usage"), dict) else {}
+    cur_tokens = (
+        int(cur.get("input_tokens") or 0)
+        + int(cur.get("cache_creation_input_tokens") or 0)
+        + int(cur.get("cache_read_input_tokens") or 0)
+    )
+    used_tokens = int(
+        cur_tokens
+        or cw.get("used_tokens")
+        or cw.get("total_tokens")
+        or 0
+    )
+    if used_tokens <= 0 and ctx_limit > 0 and used_pct > 0:
+        used_tokens = round(ctx_limit * (used_pct / 100.0))
+
     if ctx_val_mode == "remaining":
         val_text = f"{100 - round(used_pct)}%"
+    elif ctx_val_mode == "tokens" and ctx_limit > 0:
+        val_text = f"{format_tokens(used_tokens)}/{format_tokens(ctx_limit)}"
+    elif ctx_val_mode == "both" and ctx_limit > 0:
+        val_text = f"{round(used_pct)}% ({format_tokens(used_tokens)}/{format_tokens(ctx_limit)})"
     else:
         val_text = f"{round(used_pct)}%"
     val_display = f"{val_ansi}{val_text}{RESET}"
@@ -1650,23 +2134,280 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
     return " | ".join(parts)
 
 
-def render_agents_line(transcript: dict[str, Any], config: dict[str, Any], now: float) -> str:
+def _load_subagent_state() -> dict[str, Any]:
+    data = _read_json_file(SUBAGENT_STATE_FILE)
+    return data if isinstance(data, dict) else {}
+
+
+def _save_subagent_state(state: dict[str, Any], now: float) -> None:
+    cutoff = now - 86400
+    pruned = {
+        k: v
+        for k, v in state.items()
+        if isinstance(v, dict) and float(v.get("updated_at") or 0) >= cutoff
+    }
+    _write_json_atomic(SUBAGENT_STATE_FILE, pruned)
+
+
+def _normalize_subagent_status(raw_status: Any) -> str:
+    st = str(raw_status or "running").strip().lower()
+    if st in ERROR_SUBAGENT_STATUSES:
+        return "error"
+    if st in COMPLETED_SUBAGENT_STATUSES:
+        return "completed"
+    if st in RUNNING_SUBAGENT_STATUSES:
+        return "running"
+    return "running"
+
+
+def merge_subagents(
+    data: dict[str, Any],
+    transcript: dict[str, Any],
+    now: float,
+) -> list[dict[str, Any]]:
+    """Merge native stdin.subagents (authoritative live state) with transcript subagent metadata."""
+    agents: list[dict[str, Any]] = [dict(a) for a in (transcript.get("agents") or []) if isinstance(a, dict)]
+
+    has_stdin_subagents = False
+    raw_stdin_agents: list[Any] = []
+    if isinstance(data.get("subagents"), list):
+        has_stdin_subagents = True
+        raw_stdin_agents = data["subagents"]
+    elif isinstance(data.get("subagent_info"), dict) and isinstance(data["subagent_info"].get("subagents"), list):
+        has_stdin_subagents = True
+        raw_stdin_agents = data["subagent_info"]["subagents"]
+
+    if not has_stdin_subagents:
+        return agents
+
+    session_key = str(data.get("conversation_id") or data.get("session_id") or "default")
+    all_state = _load_subagent_state()
+    sess_state = dict(all_state.get(session_key) or {})
+    cached_agents = dict(sess_state.get("agents") or {})
+    state_dirty = False
+
+    def _cache_key(item_cid: str, item_role: str, fallback_id: str) -> str:
+        if item_cid:
+            return f"cid:{item_cid.lower()}"
+        if item_role:
+            return f"role:{item_role.lower()}"
+        return f"id:{fallback_id}"
+
+    matched_indices: set[int] = set()
+
+    for idx, raw in enumerate(raw_stdin_agents):
+        if not isinstance(raw, dict):
+            continue
+        cid = str(raw.get("conversation_id") or raw.get("conversationId") or raw.get("id") or "").strip()
+        raw_role = str(raw.get("role") or raw.get("name") or raw.get("type_name") or raw.get("type") or "").strip()
+        raw_name = str(raw.get("name") or "").strip()
+        role = raw_role or raw_name or "subagent"
+        norm_status = _normalize_subagent_status(raw.get("status"))
+        stdin_model = str(raw.get("model") or "").strip()
+        stdin_desc = _sanitize_text(raw.get("description") or raw.get("task") or raw.get("summary") or "", 40)
+        stdin_start = parse_iso_timestamp(raw.get("started_at") or raw.get("start_time") or raw.get("created_at"))
+        stdin_end = parse_iso_timestamp(raw.get("ended_at") or raw.get("end_time"))
+
+        match_idx: int | None = None
+        if cid:
+            cid_low = cid.lower()
+            for ai in range(len(agents) - 1, -1, -1):
+                if ai in matched_indices:
+                    continue
+                if str(agents[ai].get("conv_id") or "").lower() == cid_low:
+                    match_idx = ai
+                    break
+        if match_idx is None:
+            candidates = {x.lower() for x in (raw_role, raw_name) if x}
+            if candidates:
+                for ai in range(len(agents) - 1, -1, -1):
+                    if ai in matched_indices:
+                        continue
+                    ag_role = str(agents[ai].get("role") or "").lower()
+                    ag_type = str(agents[ai].get("type_name") or "").lower()
+                    if ag_role in candidates or ag_type in candidates:
+                        match_idx = ai
+                        break
+
+        ckey = _cache_key(cid, role, f"stdin:{idx}")
+        c_entry = dict(cached_agents.get(ckey) or {})
+
+        if match_idx is not None:
+            matched_indices.add(match_idx)
+            ag = agents[match_idx]
+            if cid and not ag.get("conv_id"):
+                ag["conv_id"] = cid
+            if stdin_model and (not ag.get("model") or stdin_model.lower() != "inherit"):
+                ag["model"] = stdin_model
+            if stdin_desc and not ag.get("description"):
+                ag["description"] = stdin_desc
+            if stdin_start is not None:
+                ag["start_ts"] = stdin_start
+            elif c_entry.get("start_ts") is not None and not ag.get("start_ts"):
+                ag["start_ts"] = float(c_entry["start_ts"])
+
+            ag["status"] = norm_status
+            if norm_status == "running":
+                ag["end_ts"] = None
+                if c_entry.get("end_ts") is not None:
+                    c_entry.pop("end_ts", None)
+                    state_dirty = True
+            else:
+                resolved_end = stdin_end or ag.get("end_ts") or c_entry.get("end_ts") or ag.get("child_end_ts") or now
+                ag["end_ts"] = float(resolved_end)
+                if c_entry.get("end_ts") != ag["end_ts"]:
+                    c_entry["end_ts"] = ag["end_ts"]
+                    state_dirty = True
+
+            if c_entry.get("start_ts") != ag.get("start_ts"):
+                c_entry["start_ts"] = float(ag.get("start_ts") or now)
+                state_dirty = True
+            cached_agents[ckey] = c_entry
+        else:
+            start_ts = stdin_start or (float(c_entry["start_ts"]) if c_entry.get("start_ts") is not None else now)
+            if norm_status == "running":
+                end_ts = None
+                if c_entry.get("end_ts") is not None:
+                    c_entry.pop("end_ts", None)
+                    state_dirty = True
+            else:
+                end_ts = float(stdin_end or c_entry.get("end_ts") or now)
+                if c_entry.get("end_ts") != end_ts:
+                    c_entry["end_ts"] = end_ts
+                    state_dirty = True
+
+            if c_entry.get("start_ts") != start_ts:
+                c_entry["start_ts"] = start_ts
+                state_dirty = True
+            cached_agents[ckey] = c_entry
+
+            agents.append({
+                "id": cid or f"stdin:{idx}:{role}",
+                "conv_id": cid,
+                "role": role,
+                "type_name": str(raw.get("type_name") or raw.get("type") or ""),
+                "model": stdin_model if stdin_model.lower() != "inherit" else "",
+                "description": stdin_desc,
+                "active_tool": "",
+                "child_last_ts": None,
+                "status": norm_status,
+                "start_ts": start_ts,
+                "end_ts": end_ts,
+                "source": "stdin",
+            })
+
+    # Reconcile transcript-only running agents omitted from stdin.subagents
+    for ai, ag in enumerate(agents):
+        if ai in matched_indices or ag.get("status") != "running":
+            continue
+        start_ts = float(ag.get("start_ts") or now)
+        if (now - start_ts) > 2.0:
+            ckey = _cache_key(str(ag.get("conv_id") or ""), str(ag.get("role") or ""), str(ag.get("id") or ai))
+            c_entry = dict(cached_agents.get(ckey) or {})
+            resolved_end = ag.get("child_end_ts") or c_entry.get("end_ts") or now
+            ag["status"] = "completed"
+            ag["end_ts"] = float(resolved_end)
+            if c_entry.get("end_ts") != ag["end_ts"]:
+                c_entry["end_ts"] = ag["end_ts"]
+                c_entry.setdefault("start_ts", start_ts)
+                cached_agents[ckey] = c_entry
+                state_dirty = True
+
+    if state_dirty:
+        all_state[session_key] = {"updated_at": now, "agents": cached_agents}
+        _save_subagent_state(all_state, now)
+
+    return agents
+
+
+_TODO_MD_RE = re.compile(r"^\s*(?:[-*+]|\d+\.)\s+\[([ xX/])\]\s+(.+)$")
+
+
+def _parse_markdown_todos(path: Path) -> list[dict[str, str]]:
+    if not path.is_file():
+        return []
+    todos: list[dict[str, str]] = []
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except Exception:
+        return []
+    for line in text.splitlines():
+        m = _TODO_MD_RE.match(line)
+        if not m:
+            continue
+        mark, raw_content = m.groups()
+        content = _sanitize_text(raw_content)
+        if not content:
+            continue
+        if mark in ("x", "X"):
+            status = "completed"
+        elif mark == "/":
+            status = "in_progress"
+        else:
+            status = "pending"
+        todos.append({"content": content, "status": status})
+    return todos
+
+
+def load_todos(data: dict[str, Any], transcript: dict[str, Any], transcript_path: Path | None) -> list[dict[str, str]]:
+    brain_dir = _find_brain_dir(data, transcript_path)
+    if brain_dir is not None:
+        md_todos = _parse_markdown_todos(brain_dir / "task.md")
+        if md_todos:
+            return md_todos
+    return list(transcript.get("todos") or [])
+
+
+def render_todos_line(todos: list[dict[str, str]], config: dict[str, Any]) -> str:
+    display = config["display"]
+    colors = config["colors"]
+    if not display.get("showTodos", True) or not todos:
+        return ""
+
+    total = len(todos)
+    completed = sum(1 for td in todos if td.get("status") == "completed")
+    in_progress = next((td for td in todos if td.get("status") == "in_progress"), None)
+
+    if in_progress is not None:
+        content = _sanitize_text(in_progress.get("content", ""), 50)
+        return f"{colorize('▸', YELLOW)} {content} {c_label(f'({completed}/{total})', colors)}"
+    if completed == total and total > 0:
+        return f"{colorize('✓', GREEN)} {tr(config, 'status.allTodosComplete')} {c_label(f'({completed}/{total})', colors)}"
+
+    first_pending = next((td for td in todos if td.get("status") == "pending"), None)
+    if first_pending is not None:
+        content = _sanitize_text(first_pending.get("content", ""), 50)
+        return f"{colorize('▸', YELLOW)} {content} {c_label(f'({completed}/{total})', colors)}"
+    return ""
+
+
+def render_agents_line(agents: list[dict[str, Any]], config: dict[str, Any], now: float) -> str:
     display = config["display"]
     colors = config["colors"]
     if not display.get("showAgents", True):
         return ""
-    agents = transcript.get("agents") or []
     if not agents:
         return ""
 
-    running = [a for a in agents if a.get("status") == "running"][-3:]
+    retention = float(display.get("agentCompletedRetentionSeconds", 60))
+    seen_ids: set[str] = set()
+    deduped: list[dict[str, Any]] = []
+    for a in agents:
+        aid = str(a.get("id") or "")
+        if aid and aid in seen_ids:
+            continue
+        if aid:
+            seen_ids.add(aid)
+        deduped.append(a)
+
+    running = [a for a in deduped if a.get("status") == "running"][-3:]
     rem_slots = max(0, min(2, 3 - len(running)))
     recent_completed = [
         a
-        for a in agents
-        if a.get("status") == "completed"
+        for a in deduped
+        if a.get("status") in ("completed", "error")
         and a.get("end_ts") is not None
-        and 0 <= (now - float(a["end_ts"])) <= 60.0
+        and 0 <= (now - float(a["end_ts"])) <= retention
     ][-rem_slots:] if rem_slots > 0 else []
 
     shown = running + recent_completed
@@ -1675,12 +2416,28 @@ def render_agents_line(transcript: dict[str, Any], config: dict[str, Any], now: 
 
     lines: list[str] = []
     for ag in shown:
-        icon = colorize("◐", YELLOW) if ag.get("status") == "running" else colorize("✓", GREEN)
-        role = colorize(str(ag.get("role") or "subagent")[:24], MAGENTA)
-        mdl = c_label(f" [{ag['model']}]", colors) if ag.get("model") else ""
+        st = ag.get("status")
+        if st == "running":
+            icon = colorize("◐", YELLOW)
+        elif st == "error":
+            icon = colorize("✗", RED)
+        else:
+            icon = colorize("✓", GREEN)
+
+        role_txt = _sanitize_text(ag.get("role") or "subagent", 24) or "subagent"
+        role = colorize(role_txt, MAGENTA)
+        model_short = format_agent_model(str(ag.get("model") or ""))
+        mdl = c_label(f" [{model_short}]", colors) if model_short else ""
+
+        raw_desc = str(ag.get("description") or "")
+        if not raw_desc and st == "running":
+            raw_desc = str(ag.get("active_tool") or "")
+        desc_clean = _sanitize_text(raw_desc, 40)
+        desc = c_label(f": {desc_clean}", colors) if desc_clean else ""
+
         end_t = float(ag["end_ts"]) if ag.get("end_ts") is not None else now
         elapsed = format_elapsed_short(end_t - float(ag.get("start_ts") or now))
-        lines.append(f"{icon} {role}{mdl} {c_label(f'({elapsed})', colors)}")
+        lines.append(f"{icon} {role}{mdl}{desc} {c_label(f'({elapsed})', colors)}")
     return "\n".join(lines)
 
 
@@ -1705,6 +2462,8 @@ def render_hud(
 
     tp = resolve_transcript_path(data)
     transcript = parse_agy_transcript(tp, agent_state=agent_state)
+    agents = merge_subagents(data, transcript, now_ts)
+    todos = load_todos(data, transcript, tp)
     git_status = get_git_status(cwd, cfg.get("gitStatus", {}), data=data)
     counts = count_agy_configs(cwd)
     stdin_pools = parse_stdin_quota_pools(data, now_ts)
@@ -1724,7 +2483,8 @@ def render_hud(
     line2 = f"{ctx_seg} │ {usage_seg}" if (ctx_seg and usage_seg) else (ctx_seg or usage_seg)
     line3 = render_environment_line(counts, cfg)
     line4 = render_tools_line(transcript, cfg)
-    line5 = render_agents_line(transcript, cfg, now_ts)
+    line5 = render_agents_line(agents, cfg, now_ts)
+    line6 = render_todos_line(todos, cfg)
 
     raw_lines: list[str] = []
     if cfg.get("lineLayout") == "compact":
@@ -1736,7 +2496,7 @@ def render_hud(
             if ln:
                 raw_lines.append(ln)
 
-    activity_lines = [ln for ln in (line4, line5) if ln]
+    activity_lines = [ln for ln in (line4, line5, line6) if ln]
     if cfg.get("showSeparators") and raw_lines and activity_lines:
         sep_w = max(20, max(visual_width(ln) for ln in raw_lines))
         raw_lines.append(c_label("─" * sep_w, cfg["colors"]))

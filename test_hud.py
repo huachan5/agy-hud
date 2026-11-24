@@ -8,6 +8,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 HUD_DIR = Path(__file__).resolve().parent
 sys.path.insert(0, str(HUD_DIR))
@@ -194,6 +195,337 @@ class TestAgyHud(unittest.TestCase):
             self.assertEqual(kwargs, {"creationflags": subprocess.CREATE_NO_WINDOW})
         src = (HUD_DIR / "hud.py").read_text(encoding="utf-8")
         self.assertNotIn("DETACHED_PROCESS", src)
+
+    def test_background_subagent_stays_running_on_idle_and_subsequent_tools(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_sub_state = hud.SUBAGENT_STATE_FILE
+            old_sess_starts = hud.SESSION_STARTS_FILE
+            hud.SUBAGENT_STATE_FILE = Path(tmp) / "subagent-state.json"
+            hud.SESSION_STARTS_FILE = Path(tmp) / "session-starts.json"
+            try:
+                child_cid = "11111111-2222-3333-4444-555555555555"
+                transcript = Path(tmp) / "transcript.jsonl"
+                lines = [
+                    {
+                        "step_index": 1,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:00Z",
+                        "tool_calls": [
+                            {
+                                "name": "invoke_subagent",
+                                "args": {
+                                    "Role": "Codebase Researcher",
+                                    "TypeName": "research",
+                                    "Model": "inherit",
+                                    "Prompt": "Find auth middleware implementation details",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "step_index": 2,
+                        "source": "MODEL",
+                        "type": "GENERIC",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:01Z",
+                        "content": f"Subagent launched with conversationId: {child_cid}",
+                    },
+                    {
+                        "step_index": 3,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:02Z",
+                        "tool_calls": [{"name": "read_file", "args": {"Path": "C:/repo/main.py"}}],
+                    },
+                    {
+                        "step_index": 4,
+                        "source": "MODEL",
+                        "type": "GENERIC",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:03Z",
+                        "content": "file contents",
+                    },
+                ]
+                transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+                now = hud.parse_iso_timestamp("2026-11-24T08:00:15Z")
+                payload = {
+                    "model": {"display_name": "Gemini 4 Neon (High)"},
+                    "agent_state": "idle",
+                    "context_window": {"used_percentage": 15.0},
+                    "transcript_path": str(transcript),
+                }
+                plain = strip_ansi(hud.render_hud(payload, hud.DEFAULT_CONFIG, now=now, allow_bg_refresh=False))
+                self.assertIn("◐ Codebase Researcher: Find auth middleware implementation det… (15s)", plain)
+            finally:
+                hud.SUBAGENT_STATE_FILE = old_sub_state
+                hud.SESSION_STARTS_FILE = old_sess_starts
+
+    def test_stdin_subagents_merge_with_transcript_and_child_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_sub_state = hud.SUBAGENT_STATE_FILE
+            old_sess_starts = hud.SESSION_STARTS_FILE
+            hud.SUBAGENT_STATE_FILE = Path(tmp) / "subagent-state.json"
+            hud.SESSION_STARTS_FILE = Path(tmp) / "session-starts.json"
+            try:
+                brain_root = Path(tmp) / "brain"
+                parent_cid = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+                child_cid = "99999999-8888-7777-6666-555555555555"
+
+                parent_log = brain_root / parent_cid / ".system_generated" / "logs" / "transcript.jsonl"
+                parent_log.parent.mkdir(parents=True)
+                parent_lines = [
+                    {
+                        "step_index": 1,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:00Z",
+                        "tool_calls": [
+                            {
+                                "name": "invoke_subagent",
+                                "args": {
+                                    "Role": "Codebase Researcher",
+                                    "Model": "inherit",
+                                    "Prompt": "### Search auth middleware\nCheck JWT verification",
+                                },
+                            }
+                        ],
+                    },
+                    {
+                        "step_index": 2,
+                        "source": "MODEL",
+                        "type": "GENERIC",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:01Z",
+                        "content": f'{{"conversationId": "{child_cid}"}}',
+                    },
+                ]
+                parent_log.write_text("\n".join(json.dumps(x) for x in parent_lines) + "\n", encoding="utf-8")
+
+                child_log = brain_root / child_cid / ".system_generated" / "logs" / "transcript.jsonl"
+                child_log.parent.mkdir(parents=True)
+                child_lines = [
+                    {
+                        "step_index": 1,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:01Z",
+                        "model": "gemini-4-hydrogen-medium",
+                        "tool_calls": [{"name": "read_file", "args": {"Path": "C:/repo/auth.py"}}],
+                    }
+                ]
+                child_log.write_text("\n".join(json.dumps(x) for x in child_lines) + "\n", encoding="utf-8")
+
+                t1 = hud.parse_iso_timestamp("2026-11-24T08:00:13Z")
+                payload_running = {
+                    "conversation_id": parent_cid,
+                    "model": {"display_name": "Gemini 4 Neon (High)"},
+                    "agent_state": "idle",
+                    "context_window": {"used_percentage": 20.0},
+                    "transcript_path": str(parent_log),
+                    "subagents": [
+                        {"conversation_id": child_cid, "role": "Codebase Researcher", "status": "running"}
+                    ],
+                }
+                plain_running = strip_ansi(hud.render_hud(payload_running, hud.DEFAULT_CONFIG, now=t1, allow_bg_refresh=False))
+                self.assertIn("◐ Codebase Researcher [gemini-4-hydrogen]: Search auth middleware (12s)", plain_running)
+
+                # Explicit completed status in stdin.subagents
+                t2 = hud.parse_iso_timestamp("2026-11-24T08:00:21Z")
+                payload_done = dict(payload_running)
+                payload_done["subagents"] = [
+                    {"conversation_id": child_cid, "role": "Codebase Researcher", "status": "completed"}
+                ]
+                plain_done = strip_ansi(hud.render_hud(payload_done, hud.DEFAULT_CONFIG, now=t2, allow_bg_refresh=False))
+                self.assertIn("✓ Codebase Researcher [gemini-4-hydrogen]: Search auth middleware (20s)", plain_done)
+
+                # Still retained within 60s even if stdin.subagents becomes empty []
+                t3 = hud.parse_iso_timestamp("2026-11-24T08:00:40Z")
+                payload_empty = dict(payload_running)
+                payload_empty["subagents"] = []
+                plain_retained = strip_ansi(hud.render_hud(payload_empty, hud.DEFAULT_CONFIG, now=t3, allow_bg_refresh=False))
+                self.assertIn("✓ Codebase Researcher [gemini-4-hydrogen]: Search auth middleware (20s)", plain_retained)
+
+                # Expired after > 60s retention
+                t4 = hud.parse_iso_timestamp("2026-11-24T08:01:25Z")
+                plain_expired = strip_ansi(hud.render_hud(payload_empty, hud.DEFAULT_CONFIG, now=t4, allow_bg_refresh=False))
+                self.assertNotIn("Codebase Researcher", plain_expired)
+            finally:
+                hud.SUBAGENT_STATE_FILE = old_sub_state
+                hud.SESSION_STARTS_FILE = old_sess_starts
+
+    def test_subagent_kill_and_swarm_workers(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_sub_state = hud.SUBAGENT_STATE_FILE
+            old_sess_starts = hud.SESSION_STARTS_FILE
+            hud.SUBAGENT_STATE_FILE = Path(tmp) / "subagent-state.json"
+            hud.SESSION_STARTS_FILE = Path(tmp) / "session-starts.json"
+            try:
+                c1 = "11111111-1111-1111-1111-111111111111"
+                c2 = "22222222-2222-2222-2222-222222222222"
+                transcript = Path(tmp) / "transcript.jsonl"
+                lines = [
+                    {
+                        "step_index": 1,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:00Z",
+                        "tool_calls": [
+                            {"name": "invoke_subagent", "args": {"Role": "Agent One", "Prompt": "Task 1"}},
+                            {"name": "invoke_subagent", "args": {"Role": "Agent Two", "Prompt": "Task 2"}},
+                            {"name": "swarm", "args": {"action": "add", "name": "worker", "model": "claude-haiku-4-5-20251001", "tasks": ["Lint files", "Run unit tests"]}},
+                        ],
+                    },
+                    {"step_index": 2, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T08:00:01Z", "content": f"id={c1}"},
+                    {"step_index": 3, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T08:00:01Z", "content": f"id={c2}"},
+                    {"step_index": 4, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T08:00:01Z", "content": "spawned"},
+                    {
+                        "step_index": 5,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-24T08:00:10Z",
+                        "tool_calls": [
+                            {"name": "manage_subagents", "args": {"Action": "kill", "ConversationIds": [c1]}},
+                            {"name": "swarm", "args": {"action": "kill", "name": "worker-1"}},
+                        ],
+                    },
+                    {"step_index": 6, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T08:00:11Z", "content": "killed"},
+                    {"step_index": 7, "source": "MODEL", "type": "GENERIC", "status": "DONE", "created_at": "2026-11-24T08:00:11Z", "content": "killed"},
+                ]
+                transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+                now = hud.parse_iso_timestamp("2026-11-24T08:00:25Z")
+                parsed = hud.parse_agy_transcript(transcript, agent_state="idle")
+                by_role = {a["role"]: a for a in parsed["agents"]}
+                self.assertEqual(by_role["Agent One"]["status"], "completed")
+                self.assertEqual(by_role["Agent Two"]["status"], "running")
+                self.assertEqual(by_role["worker-1"]["status"], "completed")
+                self.assertEqual(by_role["worker-2"]["status"], "running")
+
+                plain = strip_ansi(hud.render_hud(
+                    {"model": {"display_name": "Gemini 4 Neon"}, "context_window": {"used_percentage": 10}, "transcript_path": str(transcript)},
+                    hud.DEFAULT_CONFIG,
+                    now=now,
+                    allow_bg_refresh=False,
+                ))
+                self.assertIn("◐ Agent Two: Task 2 (25s)", plain)
+                self.assertIn("◐ worker-2 [haiku-4.5]: Run unit tests (25s)", plain)
+                self.assertIn("✓ worker-1 [haiku-4.5]: Lint files (10s)", plain)
+
+                # Test kill_all
+                lines.append({
+                    "step_index": 8,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-24T08:00:30Z",
+                    "tool_calls": [{"name": "manage_subagents", "args": {"Action": "kill_all"}}],
+                })
+                transcript.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+                parsed2 = hud.parse_agy_transcript(transcript, agent_state="idle")
+                by_role2 = {a["role"]: a for a in parsed2["agents"]}
+                self.assertEqual(by_role2["Agent Two"]["status"], "completed")
+            finally:
+                hud.SUBAGENT_STATE_FILE = old_sub_state
+                hud.SESSION_STARTS_FILE = old_sess_starts
+
+    def test_session_title_and_context_value_modes(self):
+        base_payload = {
+            "model": {"display_name": "Gemini 4 Neon (High)"},
+            "conversation_title": "这是一个非常非常长长长长长长长长长长长长长长长长长长的测试会话标题",
+            "context_window": {
+                "used_percentage": 45.0,
+                "context_window_size": 200000,
+                "current_usage": {"input_tokens": 60000, "cache_read_input_tokens": 30000},
+            },
+        }
+        plain_pct = strip_ansi(hud.render_hud(base_payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
+        line1 = plain_pct.splitlines()[0]
+        self.assertIn("…", line1)
+        self.assertIn("45%", plain_pct)
+
+        cfg_rem = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"contextValue": "remaining"}})
+        self.assertIn("55%", strip_ansi(hud.render_hud(base_payload, cfg_rem, now=1000.0, allow_bg_refresh=False)))
+
+        cfg_tok = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"contextValue": "tokens"}})
+        self.assertIn("90k/200k", strip_ansi(hud.render_hud(base_payload, cfg_tok, now=1000.0, allow_bg_refresh=False)))
+
+        cfg_both = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"contextValue": "both"}})
+        self.assertIn("45% (90k/200k)", strip_ansi(hud.render_hud(base_payload, cfg_both, now=1000.0, allow_bg_refresh=False)))
+
+    def test_task_md_todos_rendering(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            old_sess_starts = hud.SESSION_STARTS_FILE
+            hud.SESSION_STARTS_FILE = Path(tmp) / "session-starts.json"
+            try:
+                conv_dir = Path(tmp) / "brain" / "conv-todo"
+                log_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+                log_path.parent.mkdir(parents=True)
+                log_path.write_text('{"step_index": 0, "created_at": "2026-11-24T08:00:00Z"}\n', encoding="utf-8")
+
+                task_md = conv_dir / "task.md"
+                task_md.write_text(
+                    "- [x] 设计数据结构\n- [/] 实现子 Agent 追踪\n- [ ] 编写单元测试\n",
+                    encoding="utf-8",
+                )
+                payload = {
+                    "model": {"display_name": "Gemini 4 Neon"},
+                    "context_window": {"used_percentage": 12.0},
+                    "transcript_path": str(log_path),
+                }
+                plain_ip = strip_ansi(hud.render_hud(payload, hud.DEFAULT_CONFIG, now=hud.parse_iso_timestamp("2026-11-24T08:05:00Z"), allow_bg_refresh=False))
+                self.assertIn("▸ 实现子 Agent 追踪 (1/3)", plain_ip)
+
+                # All completed (zh-Hans and en)
+                task_md.write_text("- [x] A\n- [x] B\n", encoding="utf-8")
+                plain_done_zh = strip_ansi(hud.render_hud(payload, hud.DEFAULT_CONFIG, now=hud.parse_iso_timestamp("2026-11-24T08:05:00Z"), allow_bg_refresh=False))
+                self.assertIn("✓ 所有任务已完成 (2/2)", plain_done_zh)
+
+                cfg_en = hud._deep_merge(hud.DEFAULT_CONFIG, {"language": "en"})
+                plain_done_en = strip_ansi(hud.render_hud(payload, cfg_en, now=hud.parse_iso_timestamp("2026-11-24T08:05:00Z"), allow_bg_refresh=False))
+                self.assertIn("✓ All todos complete (2/2)", plain_done_en)
+
+                # Pending only
+                task_md.write_text("- [x] A\n- [ ] 待办事项 B\n", encoding="utf-8")
+                plain_pending = strip_ansi(hud.render_hud(payload, hud.DEFAULT_CONFIG, now=hud.parse_iso_timestamp("2026-11-24T08:05:00Z"), allow_bg_refresh=False))
+                self.assertIn("▸ 待办事项 B (1/2)", plain_pending)
+            finally:
+                hud.SESSION_STARTS_FILE = old_sess_starts
+
+    def test_git_file_stats_parsing_and_rendering(self):
+        parsed = hud._parse_porcelain_file_stats(" M keep.txt\nA  added.txt\n D del.txt\n?? untracked.txt\nR  old.txt -> new.txt\n")
+        self.assertEqual(parsed, {"modified": 2, "added": 1, "deleted": 1, "untracked": 1})
+
+        with tempfile.TemporaryDirectory() as tmp:
+            repo = Path(tmp) / "demo-repo"
+            repo.mkdir()
+            porcelain_out = " M keep.txt\nA  added.txt\n D del.txt\n?? untracked.txt\n"
+
+            payload = {
+                "model": {"display_name": "Gemini 4 Neon"},
+                "cwd": str(repo),
+                "vcs": {"branch": "main", "dirty": False},
+                "context_window": {"used_percentage": 10.0},
+            }
+
+            cfg_on = hud._deep_merge(hud.DEFAULT_CONFIG, {"gitStatus": {"showFileStats": True}})
+            with mock.patch.object(hud.subprocess, "check_output", return_value=porcelain_out) as mock_run:
+                plain_on = strip_ansi(hud.render_hud(payload, cfg_on, now=1000.0, allow_bg_refresh=False))
+                self.assertEqual(mock_run.call_count, 1)
+                self.assertRegex(plain_on, r"git:\(main\* !1 \+1 ✘1 \?1\)")
+
+            cfg_off = hud._deep_merge(hud.DEFAULT_CONFIG, {"gitStatus": {"showFileStats": False}})
+            with mock.patch.object(hud.subprocess, "check_output") as mock_run_off:
+                plain_off = strip_ansi(hud.render_hud(payload, cfg_off, now=1000.0, allow_bg_refresh=False))
+                self.assertEqual(mock_run_off.call_count, 0)
+                self.assertIn("git:(main)", plain_off)
 
 
 if __name__ == "__main__":

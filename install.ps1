@@ -69,6 +69,9 @@ if os.path.isfile(target_cfg):
             user_cfg = {}
     except Exception:
         user_cfg = {}
+    git_cfg = user_cfg.setdefault("gitStatus", {})
+    if isinstance(git_cfg, dict):
+        git_cfg.setdefault("showFileStats", True)
     disp = user_cfg.setdefault("display", {})
     if isinstance(disp, dict):
         for old_key in ("showExternalUsage", "externalUsagePath", "externalUsageFreshnessMs", "sevenDayThreshold"):
@@ -76,6 +79,9 @@ if os.path.isfile(target_cfg):
         disp.setdefault("quotaPools", "both")
         disp.setdefault("usageValue", "remaining")
         disp.setdefault("showQuotaBars", False)
+        disp.setdefault("showSessionName", True)
+        disp.setdefault("showTodos", True)
+        disp.setdefault("agentCompletedRetentionSeconds", 60)
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg
