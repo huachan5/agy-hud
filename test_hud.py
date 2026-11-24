@@ -90,7 +90,8 @@ class TestAgyHud(unittest.TestCase):
                 "plan_tier": "Google AI Pro",
                 "transcript_path": str(transcript),
             }
-            rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=now, allow_bg_refresh=False)
+            with mock.patch.object(hud, "HOME_DIR", Path(tmp)):
+                rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=now, allow_bg_refresh=False)
             plain = strip_ansi(rendered)
             rows = plain.splitlines()
             self.assertEqual(len(rows), 4, f"Expected 4 rows, got:\n{plain}")
@@ -154,7 +155,7 @@ class TestAgyHud(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         plain = strip_ansi(proc.stdout)
         self.assertIn("[Gemini 4 Hydrogen ◔ medium]", plain)
-        self.assertIn("cspace", plain)
+        self.assertIn(HUD_DIR.parent.name, plain)
         self.assertIn("上下文", plain)
         self.assertIn("18%", plain)
         self.assertIn("Gemini 5h: 92%", plain)
@@ -526,6 +527,124 @@ class TestAgyHud(unittest.TestCase):
                 plain_off = strip_ansi(hud.render_hud(payload, cfg_off, now=1000.0, allow_bg_refresh=False))
                 self.assertEqual(mock_run_off.call_count, 0)
                 self.assertIn("git:(main)", plain_off)
+
+    def test_global_plugins_counted(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            plugins_root = tmp_path / ".gemini" / "config" / "plugins"
+            enabled_plugin = plugins_root / "migrated-settings"
+            (enabled_plugin / "skills" / "foo").mkdir(parents=True)
+            (enabled_plugin / "skills" / "foo" / "SKILL.md").write_text("---\nname: foo\n---\n", encoding="utf-8")
+            (enabled_plugin / "mcp_config.json").write_text(
+                json.dumps({"mcpServers": {"rea": {}, "bosskit": {}}}),
+                encoding="utf-8",
+            )
+            disabled_plugin = plugins_root / "disabled-plugin"
+            (disabled_plugin / "skills" / "bar").mkdir(parents=True)
+            (disabled_plugin / "skills" / "bar" / "SKILL.md").write_text("---\nname: bar\n---\n", encoding="utf-8")
+            (disabled_plugin / "mcp_config.json").write_text(
+                json.dumps({"mcpServers": {"ignored_mcp": {}}}),
+                encoding="utf-8",
+            )
+            (disabled_plugin / "plugin.json").write_text(json.dumps({"disabled": True}), encoding="utf-8")
+
+            work_dir = tmp_path / "workspace"
+            work_dir.mkdir()
+            with mock.patch.object(hud, "HOME_DIR", tmp_path):
+                counts = hud.count_agy_configs(str(work_dir))
+            self.assertEqual(counts["mcpCount"], 2)
+            self.assertEqual(counts["skillsCount"], 1)
+
+    def test_custom_claude_hud_colors_applied_across_lines(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "claudespace"
+            root.mkdir()
+            conv_dir = tmp_path / "conv"
+            log_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+            log_path.parent.mkdir(parents=True)
+            lines = [
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-24T08:00:00Z",
+                    "tool_calls": [
+                        {"name": "read_file", "args": {"Path": "/tmp/a.py"}},
+                        {"name": "run_command", "args": {"CommandLine": "pytest"}},
+                    ],
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "created_at": "2026-11-24T08:00:01Z",
+                },
+            ]
+            log_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+            (conv_dir / "task.md").write_text("- [x] A\n- [x] B\n", encoding="utf-8")
+
+            claude_colors = {
+                "model": "#F92672",
+                "project": "#10B981",
+                "git": "#10B981",
+                "gitBranch": "#F92672",
+                "context": "#10B981",
+                "usage": "#005FCC",
+                "usageWarning": "brightMagenta",
+                "warning": "yellow",
+                "critical": "red",
+                "label": "dim",
+                "custom": 208,
+                "barFilled": "█",
+                "barEmpty": "░",
+            }
+            cfg = hud._deep_merge(hud.DEFAULT_CONFIG, {"colors": claude_colors})
+            payload = {
+                "model": {"display_name": "Gemini 4 Neon (XHigh)", "id": "gemini-4-neon"},
+                "agent_state": "working",
+                "cwd": str(root),
+                "vcs": {"branch": "main", "dirty": True},
+                "sandbox": {"enabled": True, "allow_network": False},
+                "context_window": {"used_percentage": 20.0},
+                "quota": SAMPLE_QUOTA,
+                "transcript_path": str(log_path),
+                "subagents": [
+                    {
+                        "conversation_id": "sub-1",
+                        "role": "Researcher",
+                        "model": "gemini-4-flash",
+                        "status": "completed",
+                        "started_at": "2026-11-24T08:00:00Z",
+                        "ended_at": "2026-11-24T08:00:03Z",
+                    }
+                ],
+            }
+            with mock.patch.object(hud, "HOME_DIR", tmp_path):
+                rendered = hud.render_hud(
+                    payload,
+                    cfg,
+                    now=hud.parse_iso_timestamp("2026-11-24T08:00:05Z"),
+                    allow_bg_refresh=False,
+                )
+
+            pink = "\x1b[38;2;249;38;114m"
+            emerald = "\x1b[38;2;16;185;129m"
+            cobalt = "\x1b[38;2;0;95;204m"
+            orange208 = "\x1b[38;5;208m"
+            self.assertIn(f"{pink}[Gemini 4 Neon ◕ xhigh]", rendered)
+            self.assertIn(f"{emerald}claudespace", rendered)
+            self.assertIn(f"{emerald}git:(", rendered)
+            self.assertIn(f"{pink}main*", rendered)
+            self.assertIn(f"{orange208}[sandbox]", rendered)
+            self.assertIn(f"{emerald}20%", rendered)
+            self.assertIn(f"{cobalt}92%", rendered)
+            self.assertIn(f"{cobalt}Shell", rendered)
+            self.assertIn(f"{emerald}✓\x1b[0m Read", rendered)
+            self.assertIn(f"{emerald}✓\x1b[0m \x1b[95mResearcher", rendered)
+            self.assertIn(f"{emerald}✓\x1b[0m 所有任务已完成", rendered)
 
 
 if __name__ == "__main__":

@@ -770,6 +770,40 @@ def _count_hooks_in_file(path: Path, seen_names: set[str]) -> None:
         pass
 
 
+def _scan_plugins_dir(
+    plugins_dir: Path,
+    mcp_seen: set[str],
+    hooks_seen: set[str],
+    rules_seen: set[str],
+    skills_seen: set[str],
+) -> None:
+    """Count enabled plugin MCP servers, hooks, skills, and rules under plugins_dir."""
+    if not plugins_dir.is_dir():
+        return
+    try:
+        for pdir in plugins_dir.iterdir():
+            if not pdir.is_dir():
+                continue
+            pjson = pdir / "plugin.json"
+            if pjson.is_file():
+                try:
+                    with pjson.open("r", encoding="utf-8") as f:
+                        meta = json.load(f)
+                    if isinstance(meta, dict) and meta.get("disabled") is True:
+                        continue
+                except Exception:
+                    pass
+            _count_mcp_in_file(pdir / "mcp_config.json", mcp_seen)
+            _count_hooks_in_file(pdir / "hooks.json", hooks_seen)
+            _count_skills_in_dir(pdir / "skills", skills_seen)
+            prules = pdir / "rules"
+            if prules.is_dir():
+                for rf in prules.glob("*.md"):
+                    rules_seen.add(str(rf.resolve()).lower())
+    except Exception:
+        pass
+
+
 def count_agy_configs(cwd_str: str) -> dict[str, int]:
     agents_md_seen: set[str] = set()
     rules_seen: set[str] = set()
@@ -799,6 +833,7 @@ def count_agy_configs(cwd_str: str) -> dict[str, int]:
         _count_mcp_in_file(global_cfg_dir / "mcp_config.json", mcp_seen)
         _count_hooks_in_file(global_cfg_dir / "hooks.json", hooks_seen)
         _count_skills_in_dir(global_cfg_dir / "skills", skills_seen)
+        _scan_plugins_dir(global_cfg_dir / "plugins", mcp_seen, hooks_seen, rules_seen, skills_seen)
 
     for d in dirs_to_scan:
         for fname in ("AGENTS.md", "GEMINI.md"):
@@ -842,30 +877,7 @@ def count_agy_configs(cwd_str: str) -> dict[str, int]:
             _count_hooks_in_file(dot_dir / "hooks.json", hooks_seen)
 
             # Plugins
-            plugins_dir = dot_dir / "plugins"
-            if plugins_dir.is_dir():
-                try:
-                    for pdir in plugins_dir.iterdir():
-                        if not pdir.is_dir():
-                            continue
-                        pjson = pdir / "plugin.json"
-                        if pjson.is_file():
-                            try:
-                                with pjson.open("r", encoding="utf-8") as f:
-                                    meta = json.load(f)
-                                if isinstance(meta, dict) and meta.get("disabled") is True:
-                                    continue
-                            except Exception:
-                                pass
-                        _count_mcp_in_file(pdir / "mcp_config.json", mcp_seen)
-                        _count_hooks_in_file(pdir / "hooks.json", hooks_seen)
-                        _count_skills_in_dir(pdir / "skills", skills_seen)
-                        prules = pdir / "rules"
-                        if prules.is_dir():
-                            for rf in prules.glob("*.md"):
-                                rules_seen.add(str(rf.resolve()).lower())
-                except Exception:
-                    pass
+            _scan_plugins_dir(dot_dir / "plugins", mcp_seen, hooks_seen, rules_seen, skills_seen)
 
     return {
         "agentsMdCount": len(agents_md_seen),
@@ -1870,17 +1882,17 @@ def render_project_line(
     sandbox_info = data.get("sandbox") or {}
     if display.get("showSandbox", True) and sandbox_info.get("enabled"):
         sb_text = "[sandbox:net]" if sandbox_info.get("allow_network") else "[sandbox]"
-        parts.append(colorize(sb_text, ORANGE))
+        parts.append(colorize(sb_text, resolve_ansi(colors.get("custom"), ORANGE)))
 
     # 4. Optional non-idle agent state
     if display.get("showAgentState", False):
         st = str(data.get("agent_state") or "idle").lower()
         if st == "working":
-            parts.append(colorize("◐ working", CYAN))
+            parts.append(colorize("◐ working", resolve_ansi(colors.get("usage"), CYAN)))
         elif st == "waiting":
-            parts.append(colorize("⏳ waiting", YELLOW))
+            parts.append(colorize("⏳ waiting", resolve_ansi(colors.get("warning"), YELLOW)))
         elif st == "error":
-            parts.append(colorize("⚠ error", RED))
+            parts.append(colorize("⚠ error", resolve_ansi(colors.get("critical"), RED)))
 
     # 5. Session duration
     if display.get("showDuration", True):
@@ -2110,11 +2122,15 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
     running = [t for t in tools if t.get("status") == "running"]
     completed = [t for t in tools if t.get("status") in ("completed", "error")]
 
+    warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
+    usage_ansi = resolve_ansi(colors.get("usage"), CYAN)
+    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+
     for tool in running[-2:]:
         tname = _format_tool_name(str(tool["name"]), display)
         target = str(tool.get("target") or "")
         target_str = c_label(f": {target}", colors) if target else ""
-        parts.append(f"{colorize('◐', YELLOW)} {colorize(tname, CYAN)}{target_str}")
+        parts.append(f"{colorize('◐', warn_ansi)} {colorize(tname, usage_ansi)}{target_str}")
 
     counts: dict[str, int] = {}
     for tool in completed:
@@ -2125,7 +2141,7 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
     max_vis = int(display.get("toolsMaxVisible", 4))
     visible = sorted_tools if max_vis == 0 else sorted_tools[:max_vis]
     for tname, cnt in visible:
-        parts.append(f"{colorize('✓', GREEN)} {tname} {c_label(f'×{cnt}', colors)}")
+        parts.append(f"{colorize('✓', ctx_ansi)} {tname} {c_label(f'×{cnt}', colors)}")
 
     hidden = 0 if max_vis == 0 else max(0, len(sorted_tools) - len(visible))
     if hidden > 0:
@@ -2368,16 +2384,19 @@ def render_todos_line(todos: list[dict[str, str]], config: dict[str, Any]) -> st
     completed = sum(1 for td in todos if td.get("status") == "completed")
     in_progress = next((td for td in todos if td.get("status") == "in_progress"), None)
 
+    warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
+    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+
     if in_progress is not None:
         content = _sanitize_text(in_progress.get("content", ""), 50)
-        return f"{colorize('▸', YELLOW)} {content} {c_label(f'({completed}/{total})', colors)}"
+        return f"{colorize('▸', warn_ansi)} {content} {c_label(f'({completed}/{total})', colors)}"
     if completed == total and total > 0:
-        return f"{colorize('✓', GREEN)} {tr(config, 'status.allTodosComplete')} {c_label(f'({completed}/{total})', colors)}"
+        return f"{colorize('✓', ctx_ansi)} {tr(config, 'status.allTodosComplete')} {c_label(f'({completed}/{total})', colors)}"
 
     first_pending = next((td for td in todos if td.get("status") == "pending"), None)
     if first_pending is not None:
         content = _sanitize_text(first_pending.get("content", ""), 50)
-        return f"{colorize('▸', YELLOW)} {content} {c_label(f'({completed}/{total})', colors)}"
+        return f"{colorize('▸', warn_ansi)} {content} {c_label(f'({completed}/{total})', colors)}"
     return ""
 
 
@@ -2414,18 +2433,23 @@ def render_agents_line(agents: list[dict[str, Any]], config: dict[str, Any], now
     if not shown:
         return ""
 
+    warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
+    crit_ansi = resolve_ansi(colors.get("critical"), RED)
+    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+    role_ansi = resolve_ansi(colors.get("usageWarning"), MAGENTA)
+
     lines: list[str] = []
     for ag in shown:
         st = ag.get("status")
         if st == "running":
-            icon = colorize("◐", YELLOW)
+            icon = colorize("◐", warn_ansi)
         elif st == "error":
-            icon = colorize("✗", RED)
+            icon = colorize("✗", crit_ansi)
         else:
-            icon = colorize("✓", GREEN)
+            icon = colorize("✓", ctx_ansi)
 
         role_txt = _sanitize_text(ag.get("role") or "subagent", 24) or "subagent"
-        role = colorize(role_txt, MAGENTA)
+        role = colorize(role_txt, role_ansi)
         model_short = format_agent_model(str(ag.get("model") or ""))
         mdl = c_label(f" [{model_short}]", colors) if model_short else ""
 
