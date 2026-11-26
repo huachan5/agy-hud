@@ -82,6 +82,13 @@ if os.path.isfile(target_cfg):
         disp.setdefault("showSessionName", True)
         disp.setdefault("showTodos", True)
         disp.setdefault("agentCompletedRetentionSeconds", 60)
+    pool_cfg = user_cfg.setdefault("pool", {})
+    if isinstance(pool_cfg, dict):
+        pool_cfg.setdefault("enabled", True)
+        pool_cfg.setdefault("showThreadBadge", True)
+        pool_cfg.setdefault("lowQuotaThresholdPercent", 8)
+        pool_cfg.setdefault("syncLiveTelemetry", True)
+        pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg

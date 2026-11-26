@@ -13,11 +13,13 @@ with optional fallback to local LanguageServer quota cache (`--refresh-quota`).
 """
 from __future__ import annotations
 
+import hashlib
 import http.client
 import json
 import os
 import queue
 import re
+import sqlite3
 import ssl
 import subprocess
 import sys
@@ -54,6 +56,9 @@ SUBAGENT_STATE_FILE = Path(
 QUOTA_LOCK_FILE = Path(
     os.environ.get("AGY_QUOTA_LOCK", str(DEFAULT_HUD_DIR / "quota-refresh.lock"))
 )
+
+_POOL_EMAIL_RE = re.compile(r"[a-z0-9._%+\-]+@[a-z0-9.\-]+\.[a-z]{2,}", re.ASCII)
+_POOL_SYNC_LAST: dict[str, tuple[float, str]] = {}
 
 QUOTA_MAX_AGE_SECONDS = float(os.environ.get("AGY_QUOTA_MAX_AGE_SECONDS", "900"))
 QUOTA_REFRESH_INTERVAL_SECONDS = float(os.environ.get("AGY_QUOTA_REFRESH_INTERVAL_SECONDS", "45"))
@@ -123,6 +128,12 @@ I18N: dict[str, dict[str, str]] = {
         "format.cache": "缓存",
         "status.allTodosComplete": "所有任务已完成",
         "init.initializing": "[agy-hud] 正在初始化...",
+        "pool.mismatch": "⚠ 账号不符：实际 {hint}",
+        "pool.switchTo": "⚠ 建议切换 {alt}（{info}）",
+        "pool.reset": "已重置",
+        "pool.unknownQuota": "未知余量",
+        "pool.justNow": "刚刚",
+        "pool.lowQuota": "⚠ 额度≤{threshold}%",
     },
     "en": {
         "label.context": "Context",
@@ -135,6 +146,12 @@ I18N: dict[str, dict[str, str]] = {
         "format.cache": "cache",
         "status.allTodosComplete": "All todos complete",
         "init.initializing": "[agy-hud] Initializing...",
+        "pool.mismatch": "⚠ Account mismatch: {hint}",
+        "pool.switchTo": "⚠ Switch to {alt} ({info})",
+        "pool.reset": "reset",
+        "pool.unknownQuota": "unknown",
+        "pool.justNow": "just now",
+        "pool.lowQuota": "⚠ Quota≤{threshold}%",
     },
 }
 
@@ -180,6 +197,13 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "agentCompletedRetentionSeconds": 60,
         "showTodos": True,
         "showSessionTokens": False,
+    },
+    "pool": {
+        "enabled": True,
+        "showThreadBadge": True,
+        "lowQuotaThresholdPercent": 8,
+        "syncLiveTelemetry": True,
+        "liveSyncIntervalSeconds": 5,
     },
     "colors": {
         "model": "cyan",
@@ -1704,14 +1728,27 @@ def load_agy_quota(model_name: str, data: dict[str, Any], allow_bg_refresh: bool
 
 
 THIRD_PARTY_MODEL_RE = re.compile(r"(?:claude|gpt|anthropic|openai|\bo1\b|\bo3\b|3p)", re.IGNORECASE)
+ARGON_MODEL_RE = re.compile(r"\bargon\b", re.IGNORECASE)
+POOL_DISPLAY_LABELS = {
+    "gemini": "Gemini",
+    "argon": "Argon",
+    "3p": "3P",
+}
+_DYNAMIC_QUOTA_KEY_RE = re.compile(r"^([a-z0-9][a-z0-9_.-]*?)-(5h|1d|daily|weekly|7d)$", re.IGNORECASE)
 
 
 def is_third_party_model(model_id: str = "", model_name: str = "") -> bool:
     return bool(THIRD_PARTY_MODEL_RE.search(f"{model_id} {model_name}"))
 
 
+def is_argon_model(model_id: str = "", model_name: str = "") -> bool:
+    return bool(ARGON_MODEL_RE.search(f"{model_id} {model_name}"))
+
+
 def _parse_quota_bucket(bucket: Any, now: float) -> dict[str, Any] | None:
     if not isinstance(bucket, dict):
+        return None
+    if bucket.get("disabled") is True:
         return None
     rem_pct: float | None = None
     if bucket.get("remaining_fraction") is not None:
@@ -1733,42 +1770,257 @@ def _parse_quota_bucket(bucket: Any, now: float) -> dict[str, Any] | None:
         return None
 
     reset_str = ""
+    reset_at_ts: float | None = None
     reset_secs = bucket.get("reset_in_seconds")
     if isinstance(reset_secs, (int, float)) and reset_secs > 0:
-        reset_str = format_reset_countdown(now + float(reset_secs), now)
+        reset_at_ts = now + float(reset_secs)
+        reset_str = format_reset_countdown(reset_at_ts, now)
     else:
         for key in ("reset_time", "resets_at"):
             ts = parse_iso_timestamp(bucket.get(key))
             if ts is not None:
+                reset_at_ts = ts
                 reset_str = format_reset_countdown(ts, now)
                 break
 
     return {
         "remaining_percentage": rem_pct,
         "refreshes_in": reset_str,
+        "reset_at_ts": reset_at_ts,
     }
 
 
+def _classify_quota_key(raw_key: str) -> tuple[str, str] | None:
+    key = str(raw_key or "").strip().lower()
+    if not key:
+        return None
+    exact = {
+        "gemini-5h": ("gemini", "5h"),
+        "gemini-weekly": ("gemini", "7d"),
+        "gemini-7d": ("gemini", "7d"),
+        "3p-5h": ("3p", "5h"),
+        "3p-weekly": ("3p", "7d"),
+        "3p-7d": ("3p", "7d"),
+    }
+    if key in exact:
+        return exact[key]
+
+    if "argon" in key:
+        if "5h" in key or "hourly" in key:
+            return ("argon", "5h")
+        if "1d" in key or "daily" in key:
+            return ("argon", "1d")
+        return ("argon", "7d")
+
+    m = _DYNAMIC_QUOTA_KEY_RE.fullmatch(key)
+    if m:
+        pool_name, suffix = m.groups()
+        bucket_map = {"5h": "5h", "1d": "1d", "daily": "1d", "weekly": "7d", "7d": "7d"}
+        return (pool_name.lower(), bucket_map[suffix.lower()])
+    return None
+
+
 def parse_stdin_quota_pools(data: dict[str, Any], now: float) -> dict[str, dict[str, dict[str, Any]]]:
-    """Parse AGY's native dual quota pools (gemini and 3p) from stdin.quota."""
+    """Parse AGY's native quota pools (gemini, argon, 3p, and dynamic pools) from stdin.quota."""
     quota = data.get("quota")
     if not isinstance(quota, dict):
         return {}
 
     pools: dict[str, dict[str, dict[str, Any]]] = {}
-    mapping = {
-        "gemini": (("5h", "gemini-5h"), ("7d", "gemini-weekly")),
-        "3p": (("5h", "3p-5h"), ("7d", "3p-weekly")),
-    }
-    for pool_key, buckets in mapping.items():
-        pool_data: dict[str, dict[str, Any]] = {}
-        for short_key, raw_key in buckets:
-            parsed = _parse_quota_bucket(quota.get(raw_key), now)
-            if parsed is not None:
-                pool_data[short_key] = parsed
-        if pool_data:
-            pools[pool_key] = pool_data
+    for raw_key, raw_bucket in quota.items():
+        classified = _classify_quota_key(str(raw_key))
+        if not classified:
+            continue
+        parsed = _parse_quota_bucket(raw_bucket, now)
+        if parsed is None:
+            continue
+        pool_key, short_key = classified
+        pool_data = pools.setdefault(pool_key, {})
+        if short_key not in pool_data:
+            pool_data[short_key] = parsed
     return pools
+
+
+def _detect_active_quota_pool(
+    model_id: str,
+    model_name: str,
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+) -> str:
+    if is_argon_model(model_id, model_name) and stdin_pools.get("argon"):
+        return "argon"
+    if is_third_party_model(model_id, model_name):
+        return "3p"
+    return "gemini"
+
+
+def _resolve_pool_db_path() -> Path:
+    env_db = os.environ.get("AGY_POOL_DB", "").strip()
+    if env_db:
+        return Path(env_db).expanduser()
+    env_home = os.environ.get("AGY_POOL_HOME", "").strip()
+    base = Path(env_home).expanduser() if env_home else (HOME_DIR / ".antigravity" / "agy-pool")
+    return base / "pool.db"
+
+
+def _pool_email_identity(email: Any) -> tuple[str, str] | None:
+    normalized = email.strip().lower() if isinstance(email, str) else ""
+    if not _POOL_EMAIL_RE.fullmatch(normalized):
+        return None
+    local, domain = normalized.split("@", 1)
+    hint = f"{local[0]}***@{domain}"
+    digest = hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
+    return hint, digest
+
+
+def load_pool_context(config: dict[str, Any]) -> dict[str, Any] | None:
+    pool_cfg = config.get("pool") or {}
+    if not pool_cfg.get("enabled", True):
+        return None
+
+    thread_id = os.environ.get("AGY_POOL_THREAD_ID", "").strip()
+    segment_id = os.environ.get("AGY_POOL_SEGMENT_ID", "").strip()
+    account_id = os.environ.get("AGY_POOL_ACCOUNT", "").strip()
+    if not (thread_id or segment_id or account_id):
+        return None
+
+    db_path = _resolve_pool_db_path()
+    if not db_path.is_file():
+        return None
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(f"{db_path.resolve().as_uri()}?mode=ro", uri=True, timeout=0.15)
+        conn.row_factory = sqlite3.Row
+        seq: int | None = None
+        if segment_id:
+            seg_row = conn.execute(
+                "SELECT thread_id, seq, account_id FROM segments WHERE segment_id = ?",
+                (segment_id,),
+            ).fetchone()
+            if seg_row:
+                thread_id = str(seg_row["thread_id"] or thread_id)
+                seq = int(seg_row["seq"]) if seg_row["seq"] is not None else None
+                account_id = str(seg_row["account_id"] or account_id)
+
+        acc_rows = conn.execute(
+            "SELECT account_id, email_hint, email_hash, status, "
+            "gemini_5h_remaining, gemini_5h_reset_at, gemini_7d_remaining, quota_updated_at "
+            "FROM accounts WHERE status <> 'removed' ORDER BY account_id"
+        ).fetchall()
+        accounts = [dict(r) for r in acc_rows]
+        current_acc = next((a for a in accounts if a.get("account_id") == account_id), None)
+        return {
+            "db_path": db_path,
+            "thread_id": thread_id,
+            "segment_id": segment_id,
+            "account_id": account_id,
+            "seq": seq,
+            "account": current_acc,
+            "accounts": accounts,
+        }
+    except (sqlite3.Error, OSError, ValueError):
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+
+
+def sync_pool_live_telemetry(
+    data: dict[str, Any],
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+    pool_ctx: dict[str, Any] | None,
+    config: dict[str, Any],
+    now: float | None = None,
+) -> bool:
+    if not pool_ctx:
+        return False
+    pool_cfg = config.get("pool") or {}
+    if not pool_cfg.get("enabled", True) or not pool_cfg.get("syncLiveTelemetry", True):
+        return False
+
+    segment_id = str(pool_ctx.get("segment_id") or "").strip()
+    if not segment_id:
+        return False
+
+    now_ts = time.time() if now is None else float(now)
+    interval = max(0.0, float(pool_cfg.get("liveSyncIntervalSeconds", 5)))
+    conv_id = str(data.get("conversation_id") or data.get("session_id") or "").strip()
+
+    prev = _POOL_SYNC_LAST.get(segment_id)
+    if prev is not None:
+        prev_ts, prev_cid = prev
+        if (now_ts - prev_ts) < interval and (not conv_id or conv_id == prev_cid):
+            return False
+
+    db_path = pool_ctx.get("db_path")
+    if not isinstance(db_path, Path) or not db_path.is_file():
+        return False
+
+    tp_raw = data.get("transcript_path") or data.get("transcriptPath")
+    transcript_path = str(tp_raw).strip() if isinstance(tp_raw, str) and tp_raw.strip() else None
+    obs_ident = _pool_email_identity(data.get("email"))
+    obs_hint = obs_ident[0] if obs_ident else None
+    obs_hash = obs_ident[1] if obs_ident else None
+    now_iso = datetime.fromtimestamp(now_ts, tz=timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+    conn: sqlite3.Connection | None = None
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=0.2)
+        conn.execute("PRAGMA busy_timeout=200")
+        conn.execute("BEGIN")
+        conn.execute(
+            "UPDATE segments SET "
+            "conversation_id = COALESCE(?, conversation_id), "
+            "transcript_path = COALESCE(transcript_path, ?), "
+            "observed_email_hint = COALESCE(?, observed_email_hint), "
+            "observed_email_hash = COALESCE(?, observed_email_hash), "
+            "last_heartbeat_at = ? "
+            "WHERE segment_id = ?",
+            (conv_id or None, transcript_path, obs_hint, obs_hash, now_iso, segment_id),
+        )
+
+        account_id = str(pool_ctx.get("account_id") or "").strip()
+        acc_row = pool_ctx.get("account") or {}
+        expected_hash = str(acc_row.get("email_hash") or "")
+        # Cross-account guard: never overwrite an account slot's quota with a mismatched login's quota.
+        identity_ok = (obs_hash is None) or (not expected_hash) or (obs_hash == expected_hash)
+        gemini_pool = stdin_pools.get("gemini") or {}
+        if account_id and identity_ok and gemini_pool:
+            b5 = gemini_pool.get("5h")
+            b7 = gemini_pool.get("7d")
+            rem_5h = round(float(b5["remaining_percentage"]) / 100.0, 4) if b5 else None
+            rem_7d = round(float(b7["remaining_percentage"]) / 100.0, 4) if b7 else None
+            rst_5h_iso = None
+            if b5 and b5.get("reset_at_ts") is not None:
+                rst_5h_iso = (
+                    datetime.fromtimestamp(float(b5["reset_at_ts"]), tz=timezone.utc)
+                    .isoformat(timespec="seconds")
+                    .replace("+00:00", "Z")
+                )
+            conn.execute(
+                "UPDATE accounts SET "
+                "gemini_5h_remaining = COALESCE(?, gemini_5h_remaining), "
+                "gemini_5h_reset_at = COALESCE(?, gemini_5h_reset_at), "
+                "gemini_7d_remaining = COALESCE(?, gemini_7d_remaining), "
+                "quota_updated_at = ? "
+                "WHERE account_id = ?",
+                (rem_5h, rst_5h_iso, rem_7d, now_iso, account_id),
+            )
+
+        conn.commit()
+        _POOL_SYNC_LAST[segment_id] = (now_ts, conv_id)
+        return True
+    except (sqlite3.Error, OSError, ValueError):
+        return False
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
 
 
 def render_quota_mini_bar(pct: float, is_remaining: bool, colors: dict[str, Any], width: int = 6) -> str:
@@ -1805,6 +2057,7 @@ def render_project_line(
     git_status: dict[str, Any] | None,
     config: dict[str, Any],
     now: float,
+    pool_ctx: dict[str, Any] | None = None,
 ) -> str:
     display = config["display"]
     colors = config["colors"]
@@ -1833,6 +2086,22 @@ def render_project_line(
             else:
                 badge_inner = f"{clean_model} {sym} {effort}"
         parts.append(c_model(f"[{badge_inner}]", colors))
+
+    # 1.5 Optional agy-pool thread badge
+    pool_cfg = config.get("pool") or {}
+    if pool_ctx and pool_cfg.get("enabled", True) and pool_cfg.get("showThreadBadge", True):
+        badge_parts = [str(p) for p in (pool_ctx.get("thread_id"), pool_ctx.get("account_id")) if p]
+        if pool_ctx.get("seq") is not None:
+            badge_parts.append(f"#{pool_ctx['seq']}")
+        if badge_parts:
+            badge_str = colorize(
+                f"[{'·'.join(badge_parts)}]",
+                resolve_ansi(colors.get("gitBranch"), CYAN),
+            )
+            if parts:
+                parts[-1] = f"{parts[-1]} {badge_str}"
+            else:
+                parts.append(badge_str)
 
     # 2. Project directory + Git branch
     project_seg = ""
@@ -1980,7 +2249,9 @@ def _format_pool_string(
     is_remaining = mode != "used"
     lbl = colorize(pool_label, resolve_ansi(colors.get("model"), CYAN)) if is_active else c_label(pool_label, colors)
     buckets: list[str] = []
-    for bucket_name in ("5h", "7d"):
+    ordered_buckets = [b for b in ("5h", "1d", "7d") if b in pool_data]
+    ordered_buckets.extend(sorted(b for b in pool_data if b not in ("5h", "1d", "7d")))
+    for bucket_name in ordered_buckets:
         info = pool_data.get(bucket_name)
         if not info:
             continue
@@ -2000,11 +2271,98 @@ def _format_pool_string(
     return f"{lbl} {' | '.join(buckets)}" if buckets else ""
 
 
+def _pick_alternative_account(accounts: list[dict[str, Any]], current_id: str, now_ts: float) -> dict[str, Any] | None:
+    candidates = [a for a in accounts if str(a.get("account_id") or "") and str(a.get("account_id")) != current_id]
+    if not candidates:
+        return None
+
+    def _score(acc: dict[str, Any]) -> tuple[int, float]:
+        rst = parse_iso_timestamp(acc.get("gemini_5h_reset_at"))
+        if rst is not None and rst <= now_ts:
+            return (2, 1.0)
+        rem = acc.get("gemini_5h_remaining")
+        if rem is not None:
+            return (1, float(rem))
+        return (0, -1.0)
+
+    return max(candidates, key=_score)
+
+
+def _render_pool_alert(
+    data: dict[str, Any],
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+    agy_quota_fallback: dict[str, Any],
+    pool_ctx: dict[str, Any] | None,
+    active_key: str,
+    config: dict[str, Any],
+    now_ts: float,
+) -> str:
+    if not pool_ctx:
+        return ""
+    pool_cfg = config.get("pool") or {}
+    if not pool_cfg.get("enabled", True):
+        return ""
+
+    colors = config["colors"]
+    # Priority 1: Account mismatch alert (red)
+    obs_ident = _pool_email_identity(data.get("email"))
+    acc_row = pool_ctx.get("account") or {}
+    expected_hash = str(acc_row.get("email_hash") or "")
+    if obs_ident is not None and expected_hash and obs_ident[1] != expected_hash:
+        msg = tr(config, "pool.mismatch").format(hint=obs_ident[0])
+        return colorize(msg, resolve_ansi(colors.get("critical"), RED))
+
+    # Priority 2: Low-quota switch hint (orange/warning, three states)
+    threshold = float(pool_cfg.get("lowQuotaThresholdPercent", 8))
+    cur_bucket = (stdin_pools.get("gemini") or {}).get("5h")
+    if cur_bucket is None and active_key and stdin_pools.get(active_key):
+        cur_bucket = stdin_pools[active_key].get("5h") or stdin_pools[active_key].get("7d")
+    cur_rem_pct: float | None = None
+    if cur_bucket is not None:
+        cur_rem_pct = float(cur_bucket["remaining_percentage"])
+    elif "remaining_percentage" in agy_quota_fallback:
+        cur_rem_pct = float(agy_quota_fallback["remaining_percentage"])
+
+    if cur_rem_pct is None or cur_rem_pct > threshold:
+        return ""
+
+    alt = _pick_alternative_account(pool_ctx.get("accounts") or [], str(pool_ctx.get("account_id") or ""), now_ts)
+    warn_ansi = resolve_ansi(colors.get("usageWarning"), ORANGE)
+    if alt is None:
+        th_val: int | float = int(threshold) if threshold.is_integer() else threshold
+        return colorize(tr(config, "pool.lowQuota").format(threshold=th_val), warn_ansi)
+
+    reset_ts = parse_iso_timestamp(alt.get("gemini_5h_reset_at"))
+    if reset_ts is not None and reset_ts <= now_ts:
+        info = tr(config, "pool.reset")
+    elif alt.get("gemini_5h_remaining") is not None:
+        alt_pct = max(0, min(100, round(float(alt["gemini_5h_remaining"]) * 100.0)))
+        upd_ts = parse_iso_timestamp(alt.get("quota_updated_at"))
+        if upd_ts is not None:
+            age_sec = max(0.0, now_ts - upd_ts)
+            if age_sec < 60:
+                age_txt = tr(config, "pool.justNow")
+            else:
+                dur = format_duration_seconds(age_sec)
+                is_zh = str(config.get("language") or "zh-Hans").lower().startswith("zh")
+                age_txt = f"{dur}前" if is_zh else f"{dur} ago"
+            info = f"{alt_pct}%·{age_txt}"
+        else:
+            info = f"{alt_pct}%"
+    else:
+        info = tr(config, "pool.unknownQuota")
+
+    msg = tr(config, "pool.switchTo").format(alt=alt["account_id"], info=info)
+    return colorize(msg, warn_ansi)
+
+
 def render_usage_segment(
     data: dict[str, Any],
     stdin_pools: dict[str, dict[str, dict[str, Any]]],
     agy_quota_fallback: dict[str, Any],
     config: dict[str, Any],
+    pool_ctx: dict[str, Any] | None = None,
+    now: float | None = None,
 ) -> str:
     display = config["display"]
     colors = config["colors"]
@@ -2014,6 +2372,7 @@ def render_usage_segment(
     mode = str(display.get("usageValue", "remaining"))
     show_bars = bool(display.get("showQuotaBars", False))
     pool_mode = str(display.get("quotaPools", "both")).lower()
+    now_ts = time.time() if now is None else float(now)
 
     model_info = data.get("model", {})
     if isinstance(model_info, dict):
@@ -2023,19 +2382,26 @@ def render_usage_segment(
         raw_name = str(model_info or "")
         model_id = ""
 
-    active_key = "3p" if is_third_party_model(model_id, raw_name) else "gemini"
-    secondary_key = "gemini" if active_key == "3p" else "3p"
+    active_key = _detect_active_quota_pool(model_id, raw_name, stdin_pools)
 
     segments: list[str] = []
 
     if stdin_pools:
         if pool_mode == "active":
-            chosen = [active_key] if stdin_pools.get(active_key) else ([secondary_key] if stdin_pools.get(secondary_key) else [])
+            if stdin_pools.get(active_key):
+                chosen = [active_key]
+            else:
+                first_avail = next((k for k in ("gemini", "argon", "3p", *stdin_pools.keys()) if stdin_pools.get(k)), "")
+                chosen = [first_avail] if first_avail else []
         else:
-            chosen = [k for k in (active_key, secondary_key) if stdin_pools.get(k)]
+            order = [active_key]
+            for k in ("gemini", "argon", "3p", *stdin_pools.keys()):
+                if k not in order:
+                    order.append(k)
+            chosen = [k for k in order if stdin_pools.get(k)]
 
         for k in chosen:
-            label_text = "Gemini" if k == "gemini" else "3P"
+            label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
             formatted = _format_pool_string(
                 label_text,
                 stdin_pools[k],
@@ -2073,6 +2439,10 @@ def render_usage_segment(
         out_t = int(cw.get("total_output_tokens") or 0)
         if in_t or out_t:
             segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
+
+    alert = _render_pool_alert(data, stdin_pools, agy_quota_fallback, pool_ctx, active_key, config, now_ts)
+    if alert:
+        segments.append(alert)
 
     return " │ ".join(segments)
 
@@ -2491,6 +2861,7 @@ def render_hud(
     git_status = get_git_status(cwd, cfg.get("gitStatus", {}), data=data)
     counts = count_agy_configs(cwd)
     stdin_pools = parse_stdin_quota_pools(data, now_ts)
+    pool_ctx = load_pool_context(cfg)
     agy_quota_fallback = (
         {}
         if stdin_pools
@@ -2501,9 +2872,16 @@ def render_hud(
         )
     )
 
-    line1 = render_project_line(data, transcript, git_status, cfg, now_ts)
+    line1 = render_project_line(data, transcript, git_status, cfg, now_ts, pool_ctx=pool_ctx)
     ctx_seg = render_context_segment(data, transcript, cfg)
-    usage_seg = render_usage_segment(data, stdin_pools, agy_quota_fallback, cfg)
+    usage_seg = render_usage_segment(
+        data,
+        stdin_pools,
+        agy_quota_fallback,
+        cfg,
+        pool_ctx=pool_ctx,
+        now=now_ts,
+    )
     line2 = f"{ctx_seg} │ {usage_seg}" if (ctx_seg and usage_seg) else (ctx_seg or usage_seg)
     line3 = render_environment_line(counts, cfg)
     line4 = render_tools_line(transcript, cfg)
@@ -2550,6 +2928,16 @@ def _stdin_reader(q: queue.Queue[str | None]) -> None:
         q.put(None)
 
 
+def _emit_frame(data: dict[str, Any], config: dict[str, Any]) -> None:
+    write_status_state(data)
+    now_ts = time.time()
+    pool_ctx = load_pool_context(config)
+    if pool_ctx:
+        stdin_pools = parse_stdin_quota_pools(data, now_ts)
+        sync_pool_live_telemetry(data, stdin_pools, pool_ctx, config, now=now_ts)
+    print(render_hud(data, config, now=now_ts), flush=True)
+
+
 def main(argv: list[str] | None = None) -> int:
     args = sys.argv[1:] if argv is None else argv
 
@@ -2591,8 +2979,7 @@ def main(argv: list[str] | None = None) -> int:
                 try:
                     data, _ = decoder.raw_decode(stripped)
                     if isinstance(data, dict) and data:
-                        write_status_state(data)
-                        print(render_hud(data, config), flush=True)
+                        _emit_frame(data, config)
                         rendered_any = True
                 except json.JSONDecodeError:
                     pass
@@ -2611,8 +2998,7 @@ def main(argv: list[str] | None = None) -> int:
                     data, idx = decoder.raw_decode(stripped)
                     buf = stripped[idx:]
                     if isinstance(data, dict) and any(k in data for k in ("model", "cwd", "context_window", "quota", "agent_state")):
-                        write_status_state(data)
-                        print(render_hud(data, config), flush=True)
+                        _emit_frame(data, config)
                         rendered_any = True
                 except json.JSONDecodeError:
                     break

@@ -122,6 +122,13 @@ if os.path.isfile(target_cfg):
         disp.setdefault("showSessionName", True)
         disp.setdefault("showTodos", True)
         disp.setdefault("agentCompletedRetentionSeconds", 60)
+    pool_cfg = user_cfg.setdefault("pool", {})
+    if isinstance(pool_cfg, dict):
+        pool_cfg.setdefault("enabled", True)
+        pool_cfg.setdefault("showThreadBadge", True)
+        pool_cfg.setdefault("lowQuotaThresholdPercent", 8)
+        pool_cfg.setdefault("syncLiveTelemetry", True)
+        pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
     # Preserve user-customized colors dict while ensuring colors key exists if absent
     if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
         user_cfg["colors"] = dict(default_cfg["colors"])

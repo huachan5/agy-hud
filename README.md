@@ -13,10 +13,11 @@
 ▸ 实现子 Agent 实时追踪 (2/5)
 ```
 
-- **第 1 行**：模型名 + 思考强度图标（`○ low / ◔ medium / ◑ high / ◕ xhigh / ● max`）、当前项目与 Git 分支（默认开启 `gitStatus.showFileStats` 显示 `!M +A ✘D ?U`）、会话标题（`conversation_title`）、会话时长。
-- **第 2 行**：中文上下文进度条（绿/黄/红阈值，支持 `contextValue` 切换 `percent` / `remaining` / `tokens` / `both`）+ **AGY 原生双模型配额池**：
-  - 直接读取 `agy` 传入的 `stdin.quota`，同时支持 **Gemini 池**（`gemini-5h` / `gemini-weekly`）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列），并自动把当前模型所属配额池排在前面。
-  - 可在 `config.json` 中切换 `quotaPools`（`"both"` 双池同显 / `"active"` 仅显示当前模型所在池）和 `usageValue`（`"remaining"` 显示剩余% / `"used"` 显示已用%）。
+- **第 1 行**：模型名 + 思考强度图标（`○ low / ◔ medium / ◑ high / ◕ xhigh / ● max`）、托管线程徽章（`agy-pool` 联动时显示 `[T1·main·#1]`）、当前项目与 Git 分支（默认开启 `gitStatus.showFileStats` 显示 `!M +A ✘D ?U`）、会话标题（`conversation_title`）、会话时长。
+- **第 2 行**：中文上下文进度条（绿/黄/红阈值，支持 `contextValue` 切换 `percent` / `remaining` / `tokens` / `both`）+ **AGY 原生多模型配额池**：
+  - 直接读取 `agy` 传入的 `stdin.quota`，同时支持 **Gemini 池**（`gemini-5h` / `gemini-weekly`）、**Argon 独立池**（如 `gemini-argon-wtu-weekly` / `argon-5h` 等）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列），自动把当前模型所属配额池排在前面，并自动隐藏 `"disabled": true` 的配额池。
+  - 可在 `config.json` 中切换 `quotaPools`（`"both"` 全池同显 / `"active"` 仅显示当前模型所在池）和 `usageValue`（`"remaining"` 显示剩余% / `"used"` 显示已用%）。
+  - 在 `agy-pool` 托管会话下，支持红色账号不符告警（`⚠ 账号不符`）、低额度三态切换提醒（默认 `8%`，可在 `pool.lowQuotaThresholdPercent` 调整）以及 5 秒防抖回写 `pool.db`。
 - **第 3 行**：AGY 实际加载的 `AGENTS.md` / `GEMINI.md`、规则、MCP 服务、Skills 与钩子计数。
 - **第 4 行**：实时解析当前会话 `transcript.jsonl` 的工具调用统计（运行中 `◐` + 已完成 `✓ 工具 ×次数` + `+N more`）。
 - **第 5 行（按需）**：子 Agent 实时追踪（融合 AGY 原生 `stdin.subagents` + 父子 `transcript.jsonl` + `/swarm` worker，展示角色、实际模型、任务摘要、真实耗时与完成态保留，默认保留 `agentCompletedRetentionSeconds: 60` 秒）。

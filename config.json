@@ -40,6 +40,13 @@
     "showTodos": true,
     "showSessionTokens": false
   },
+  "pool": {
+    "enabled": true,
+    "showThreadBadge": true,
+    "lowQuotaThresholdPercent": 8,
+    "syncLiveTelemetry": true,
+    "liveSyncIntervalSeconds": 5
+  },
   "colors": {
     "model": "cyan",
     "project": "yellow",

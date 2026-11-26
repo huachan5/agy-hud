@@ -646,6 +646,281 @@ class TestAgyHud(unittest.TestCase):
             self.assertIn(f"{emerald}✓\x1b[0m \x1b[95mResearcher", rendered)
             self.assertIn(f"{emerald}✓\x1b[0m 所有任务已完成", rendered)
 
+    @staticmethod
+    def _create_pool_db(db_path: Path, *, main_hash: str, backup_row: dict | None = None) -> None:
+        import sqlite3
+
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(db_path)
+        try:
+            conn.executescript(
+                """
+                CREATE TABLE accounts (
+                    account_id TEXT PRIMARY KEY,
+                    label TEXT,
+                    email_hint TEXT,
+                    email_hash TEXT UNIQUE,
+                    status TEXT NOT NULL,
+                    gemini_5h_remaining REAL,
+                    gemini_5h_reset_at TEXT,
+                    gemini_7d_remaining REAL,
+                    quota_updated_at TEXT,
+                    cooldown_until TEXT
+                );
+                CREATE TABLE threads (
+                    thread_id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    cwd TEXT NOT NULL,
+                    anchor_path TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    current_segment_id TEXT,
+                    segment_count INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE TABLE segments (
+                    segment_id TEXT PRIMARY KEY,
+                    thread_id TEXT NOT NULL,
+                    seq INTEGER NOT NULL,
+                    account_id TEXT NOT NULL,
+                    parent_segment_id TEXT,
+                    conversation_id TEXT,
+                    transcript_path TEXT,
+                    handoff_in_path TEXT,
+                    handoff_out_path TEXT,
+                    pid INTEGER,
+                    pid_create_time INTEGER,
+                    status TEXT NOT NULL,
+                    observed_email_hint TEXT,
+                    observed_email_hash TEXT,
+                    started_at TEXT NOT NULL,
+                    ended_at TEXT,
+                    last_heartbeat_at TEXT
+                );
+                """
+            )
+            conn.execute(
+                "INSERT INTO accounts(account_id, label, email_hint, email_hash, status) VALUES (?,?,?,?,?)",
+                ("main", "主力", "m***@example.test", main_hash, "active"),
+            )
+            if backup_row is not None:
+                conn.execute(
+                    "INSERT INTO accounts(account_id, label, email_hint, email_hash, status, "
+                    "gemini_5h_remaining, gemini_5h_reset_at, gemini_7d_remaining, quota_updated_at) "
+                    "VALUES (?,?,?,?,?,?,?,?,?)",
+                    (
+                        "backup",
+                        "备用",
+                        "b***@example.test",
+                        backup_row["email_hash"],
+                        "ready",
+                        backup_row.get("gemini_5h_remaining"),
+                        backup_row.get("gemini_5h_reset_at"),
+                        backup_row.get("gemini_7d_remaining"),
+                        backup_row.get("quota_updated_at"),
+                    ),
+                )
+            conn.execute(
+                "INSERT INTO threads VALUES ('T1','任务','/repo','anchors/T1.md','active','T1-seg1',1,'2026-11-26T00:00:00Z','2026-11-26T00:00:00Z')"
+            )
+            conn.execute(
+                "INSERT INTO segments(segment_id, thread_id, seq, account_id, status, started_at) "
+                "VALUES ('T1-seg1','T1',1,'main','running','2026-11-26T00:00:00Z')"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+    def test_argon_independent_quota_pool_and_ordering(self):
+        quota = dict(SAMPLE_QUOTA)
+        quota["gemini-argon-wtu-weekly"] = {"remaining_fraction": 0.84, "reset_in_seconds": 439200}
+        quota["3p-5h"] = {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True}
+        quota["3p-weekly"] = {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True}
+
+        payload_argon = {
+            "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
+            "context_window": {"used_percentage": 15.0},
+            "quota": quota,
+        }
+        plain_argon = strip_ansi(hud.render_hud(payload_argon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
+        line2_argon = plain_argon.splitlines()[1]
+        self.assertIn("Argon 7d: 84% (5d 2h)", line2_argon)
+        self.assertIn("Gemini 5h: 92%", line2_argon)
+        self.assertNotIn("3P", line2_argon)
+        self.assertLess(line2_argon.index("Argon"), line2_argon.index("Gemini"))
+
+        payload_neon = {
+            "model": {"display_name": "Gemini 4 Neon (High)", "id": "gemini-4-neon-high"},
+            "context_window": {"used_percentage": 15.0},
+            "quota": {**SAMPLE_QUOTA, "gemini-argon-wtu-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 439200}},
+        }
+        plain_neon = strip_ansi(hud.render_hud(payload_neon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
+        line2_neon = plain_neon.splitlines()[1]
+        self.assertLess(line2_neon.index("Gemini"), line2_neon.index("Argon"))
+        self.assertLess(line2_neon.index("Argon"), line2_neon.index("3P"))
+
+    def test_pool_unmanaged_and_corrupt_db_zero_regression(self):
+        import os
+
+        payload = {
+            "model": {"display_name": "Gemini 4 Neon (High)", "id": "gemini-4-neon-high"},
+            "context_window": {"used_percentage": 20.0},
+            "quota": SAMPLE_QUOTA,
+        }
+        with mock.patch.dict(os.environ, {}, clear=False):
+            for k in ("AGY_POOL_THREAD_ID", "AGY_POOL_SEGMENT_ID", "AGY_POOL_ACCOUNT", "AGY_POOL_DB", "AGY_POOL_HOME"):
+                os.environ.pop(k, None)
+            baseline = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            bad_db = Path(tmp) / "pool.db"
+            bad_db.write_text("not a sqlite database", encoding="utf-8")
+            with mock.patch.dict(
+                os.environ,
+                {"AGY_POOL_THREAD_ID": "T1", "AGY_POOL_SEGMENT_ID": "T1-seg1", "AGY_POOL_ACCOUNT": "main", "AGY_POOL_DB": str(bad_db)},
+            ):
+                degraded = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False)
+            self.assertEqual(degraded, baseline)
+
+            os.environ["AGY_POOL_DB"] = str(Path(tmp) / "missing.db")
+            missing = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False)
+            self.assertEqual(missing, baseline)
+
+    def test_pool_badge_and_low_quota_three_states(self):
+        import os
+
+        main_hash = hud._pool_email_identity("main@example.test")[1]
+        backup_hash = hud._pool_email_identity("backup@example.test")[1]
+        now_ts = hud.parse_iso_timestamp("2026-11-26T12:00:00Z")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pool.db"
+            # State 1: backup has snapshot 94% updated 2h ago, reset in future
+            self._create_pool_db(
+                db,
+                main_hash=main_hash,
+                backup_row={
+                    "email_hash": backup_hash,
+                    "gemini_5h_remaining": 0.94,
+                    "gemini_5h_reset_at": "2026-11-26T15:00:00Z",
+                    "gemini_7d_remaining": 0.90,
+                    "quota_updated_at": "2026-11-26T10:00:00Z",
+                },
+            )
+            env = {"AGY_POOL_THREAD_ID": "T1", "AGY_POOL_SEGMENT_ID": "T1-seg1", "AGY_POOL_ACCOUNT": "main", "AGY_POOL_DB": str(db)}
+            with mock.patch.dict(os.environ, env):
+                # 9% > 8%: badge shown, no switch alert
+                p9 = {
+                    "model": {"display_name": "Gemini 4 Neon"},
+                    "email": "main@example.test",
+                    "context_window": {"used_percentage": 10.0},
+                    "quota": {"gemini-5h": {"remaining_fraction": 0.09, "reset_in_seconds": 3600}},
+                }
+                plain9 = strip_ansi(hud.render_hud(p9, hud.DEFAULT_CONFIG, now=now_ts, allow_bg_refresh=False))
+                self.assertIn("[T1·main·#1]", plain9)
+                self.assertNotIn("建议切换", plain9)
+
+                # 8% <= 8%: shows 94%·2h前
+                p8 = dict(p9)
+                p8["quota"] = {"gemini-5h": {"remaining_fraction": 0.08, "reset_in_seconds": 3600}}
+                plain8 = strip_ansi(hud.render_hud(p8, hud.DEFAULT_CONFIG, now=now_ts, allow_bg_refresh=False))
+                self.assertIn("⚠ 建议切换 backup（94%·2h前）", plain8)
+
+            # State 2: backup past reset time
+            db2 = Path(tmp) / "pool2.db"
+            self._create_pool_db(
+                db2,
+                main_hash=main_hash,
+                backup_row={
+                    "email_hash": backup_hash,
+                    "gemini_5h_remaining": 0.12,
+                    "gemini_5h_reset_at": "2026-11-26T11:30:00Z",
+                    "quota_updated_at": "2026-11-26T09:00:00Z",
+                },
+            )
+            with mock.patch.dict(os.environ, {**env, "AGY_POOL_DB": str(db2)}):
+                plain_rst = strip_ansi(hud.render_hud(p8, hud.DEFAULT_CONFIG, now=now_ts, allow_bg_refresh=False))
+                self.assertIn("⚠ 建议切换 backup（已重置）", plain_rst)
+
+            # State 3: backup never observed
+            db3 = Path(tmp) / "pool3.db"
+            self._create_pool_db(db3, main_hash=main_hash, backup_row={"email_hash": backup_hash})
+            with mock.patch.dict(os.environ, {**env, "AGY_POOL_DB": str(db3)}):
+                plain_unk = strip_ansi(hud.render_hud(p8, hud.DEFAULT_CONFIG, now=now_ts, allow_bg_refresh=False))
+                self.assertIn("⚠ 建议切换 backup（未知余量）", plain_unk)
+
+    def test_pool_account_mismatch_red_alert_overrides_low_quota(self):
+        import os
+
+        main_hash = hud._pool_email_identity("main@example.test")[1]
+        backup_hash = hud._pool_email_identity("backup@example.test")[1]
+        now_ts = hud.parse_iso_timestamp("2026-11-26T12:00:00Z")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pool.db"
+            self._create_pool_db(
+                db,
+                main_hash=main_hash,
+                backup_row={"email_hash": backup_hash, "gemini_5h_remaining": 0.90, "quota_updated_at": "2026-11-26T11:00:00Z"},
+            )
+            env = {"AGY_POOL_THREAD_ID": "T1", "AGY_POOL_SEGMENT_ID": "T1-seg1", "AGY_POOL_ACCOUNT": "main", "AGY_POOL_DB": str(db)}
+            payload = {
+                "model": {"display_name": "Gemini 4 Neon"},
+                "email": "backup@example.test",
+                "context_window": {"used_percentage": 10.0},
+                "quota": {"gemini-5h": {"remaining_fraction": 0.05, "reset_in_seconds": 3600}},
+            }
+            with mock.patch.dict(os.environ, env):
+                rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=now_ts, allow_bg_refresh=False)
+            plain = strip_ansi(rendered)
+            self.assertIn("⚠ 账号不符：实际 b***@example.test", plain)
+            self.assertNotIn("建议切换", plain)
+            self.assertIn(hud.RED, rendered)
+
+    def test_pool_live_telemetry_sync_and_cross_account_guard(self):
+        import os
+        import sqlite3
+
+        main_hash = hud._pool_email_identity("main@example.test")[1]
+        hud._POOL_SYNC_LAST.clear()
+        with tempfile.TemporaryDirectory() as tmp:
+            db = Path(tmp) / "pool.db"
+            self._create_pool_db(db, main_hash=main_hash)
+            env = {"AGY_POOL_THREAD_ID": "T1", "AGY_POOL_SEGMENT_ID": "T1-seg1", "AGY_POOL_ACCOUNT": "main", "AGY_POOL_DB": str(db)}
+            with mock.patch.dict(os.environ, env):
+                ctx = hud.load_pool_context(hud.DEFAULT_CONFIG)
+                self.assertIsNotNone(ctx)
+                payload = {
+                    "conversation_id": "conv-live-1",
+                    "transcript_path": str(Path(tmp) / "transcript.jsonl"),
+                    "email": "main@example.test",
+                    "quota": {
+                        "gemini-5h": {"remaining_fraction": 0.72, "reset_in_seconds": 3600},
+                        "gemini-weekly": {"remaining_fraction": 0.65, "reset_in_seconds": 86400},
+                    },
+                }
+                t0 = 1795700000.0
+                self.assertTrue(hud.sync_pool_live_telemetry(payload, hud.parse_stdin_quota_pools(payload, t0), ctx, hud.DEFAULT_CONFIG, now=t0))
+                # Debounced within 5s when conversation_id unchanged
+                self.assertFalse(hud.sync_pool_live_telemetry(payload, hud.parse_stdin_quota_pools(payload, t0 + 2), ctx, hud.DEFAULT_CONFIG, now=t0 + 2))
+                # Mismatched email must NOT overwrite account quota
+                bad_payload = {
+                    "conversation_id": "conv-live-1",
+                    "email": "other@example.test",
+                    "quota": {"gemini-5h": {"remaining_fraction": 0.11, "reset_in_seconds": 100}},
+                }
+                self.assertTrue(hud.sync_pool_live_telemetry(bad_payload, hud.parse_stdin_quota_pools(bad_payload, t0 + 10), ctx, hud.DEFAULT_CONFIG, now=t0 + 10))
+
+            conn = sqlite3.connect(db)
+            try:
+                seg = conn.execute("SELECT conversation_id, observed_email_hint FROM segments WHERE segment_id='T1-seg1'").fetchone()
+                acc = conn.execute("SELECT gemini_5h_remaining, gemini_7d_remaining FROM accounts WHERE account_id='main'").fetchone()
+            finally:
+                conn.close()
+            self.assertEqual(seg[0], "conv-live-1")
+            self.assertAlmostEqual(acc[0], 0.72, places=3)
+            self.assertAlmostEqual(acc[1], 0.65, places=3)
+
 
 if __name__ == "__main__":
     unittest.main()
