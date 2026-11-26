@@ -76,6 +76,7 @@ CYAN = "\x1b[36m"
 BRIGHT_BLUE = "\x1b[94m"
 BRIGHT_MAGENTA = "\x1b[95m"
 ORANGE = "\x1b[38;5;208m"
+STAMP_RED = "\x1b[38;2;232;90;79m"
 
 ANSI_BY_NAME = {
     "dim": DIM,
@@ -87,6 +88,7 @@ ANSI_BY_NAME = {
     "brightBlue": BRIGHT_BLUE,
     "brightMagenta": BRIGHT_MAGENTA,
     "orange": ORANGE,
+    "stampRed": STAMP_RED,
 }
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -207,6 +209,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "colors": {
         "model": "cyan",
+        "activePool": "stampRed",
         "project": "yellow",
         "git": "magenta",
         "gitBranch": "cyan",
@@ -277,6 +280,10 @@ def resolve_ansi(value: Any, fallback: str) -> str:
             r = int(value[1:3], 16)
             g = int(value[3:5], 16)
             b = int(value[5:7], 16)
+            return f"\x1b[38;2;{r};{g};{b}m"
+        m_rgb = re.fullmatch(r"rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)", value, re.IGNORECASE)
+        if m_rgb:
+            r, g, b = (min(255, int(m_rgb.group(i))) for i in (1, 2, 3))
             return f"\x1b[38;2;{r};{g};{b}m"
         return ANSI_BY_NAME.get(value, fallback)
     return fallback
@@ -2249,7 +2256,7 @@ def _format_pool_parts(
     is_remaining = mode != "used"
     tag_text = f"[{pool_label}]"
     if is_active:
-        active_ansi = resolve_ansi(colors.get("model"), CYAN)
+        active_ansi = resolve_ansi(colors.get("activePool"), STAMP_RED)
         lbl = f"\x1b[1m{active_ansi}{tag_text}{RESET}"
     else:
         lbl = c_label(tag_text, colors)

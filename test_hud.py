@@ -101,8 +101,8 @@ class TestAgyHud(unittest.TestCase):
             self.assertIn("7%", rows[1])
             self.assertEqual(rows[2], "[Gemini]  5h: 92% (4h 12m)  7d: 88% (5d 3h)")
             self.assertEqual(rows[3], "[3P]      5h: 75% (2h 40m)  7d: 81% (6d 1h)")
-            # Active pool tag is bold cyan, inactive pool tag is dim
-            self.assertIn(f"\x1b[1m{hud.CYAN}[Gemini]{hud.RESET}", rendered)
+            # Active pool tag is bold stamp red, inactive pool tag is dim
+            self.assertIn(f"\x1b[1m{hud.STAMP_RED}[Gemini]{hud.RESET}", rendered)
             self.assertIn(f"{hud.DIM}[3P]{hud.RESET}", rendered)
             self.assertNotIn("Codex", plain)
             self.assertIn("1 AGENTS.md", rows[4])
@@ -120,7 +120,7 @@ class TestAgyHud(unittest.TestCase):
         both_rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False)
         both_plain = strip_ansi(both_rendered)
         self.assertLess(both_plain.index("[3P]"), both_plain.index("[Gemini]"))
-        self.assertIn(f"\x1b[1m{hud.CYAN}[3P]{hud.RESET}", both_rendered)
+        self.assertIn(f"\x1b[1m{hud.STAMP_RED}[3P]{hud.RESET}", both_rendered)
         self.assertIn(f"{hud.DIM}[Gemini]{hud.RESET}", both_rendered)
 
         cfg_active = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"quotaPools": "active"}})

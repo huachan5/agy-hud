@@ -89,6 +89,9 @@ if os.path.isfile(target_cfg):
         pool_cfg.setdefault("lowQuotaThresholdPercent", 8)
         pool_cfg.setdefault("syncLiveTelemetry", True)
         pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
+    colors_cfg = user_cfg.setdefault("colors", {})
+    if isinstance(colors_cfg, dict):
+        colors_cfg.setdefault("activePool", "stampRed")
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg

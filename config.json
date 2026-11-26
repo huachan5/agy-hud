@@ -49,6 +49,7 @@
   },
   "colors": {
     "model": "cyan",
+    "activePool": "stampRed",
     "project": "yellow",
     "git": "magenta",
     "gitBranch": "cyan",

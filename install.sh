@@ -132,6 +132,8 @@ if os.path.isfile(target_cfg):
     # Preserve user-customized colors dict while ensuring colors key exists if absent
     if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
         user_cfg["colors"] = dict(default_cfg["colors"])
+    elif isinstance(user_cfg.get("colors"), dict):
+        user_cfg["colors"].setdefault("activePool", "stampRed")
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg
