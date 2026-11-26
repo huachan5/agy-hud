@@ -91,7 +91,8 @@ if os.path.isfile(target_cfg):
         pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
     colors_cfg = user_cfg.setdefault("colors", {})
     if isinstance(colors_cfg, dict):
-        colors_cfg.setdefault("activePool", "stampRed")
+        if colors_cfg.get("activePool") in (None, "", "stampRed"):
+            colors_cfg["activePool"] = "slateBadge"
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg

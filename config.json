@@ -49,7 +49,7 @@
   },
   "colors": {
     "model": "cyan",
-    "activePool": "stampRed",
+    "activePool": "slateBadge",
     "project": "yellow",
     "git": "magenta",
     "gitBranch": "cyan",

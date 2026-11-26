@@ -77,6 +77,7 @@ BRIGHT_BLUE = "\x1b[94m"
 BRIGHT_MAGENTA = "\x1b[95m"
 ORANGE = "\x1b[38;5;208m"
 STAMP_RED = "\x1b[38;2;232;90;79m"
+SLATE_BADGE = "\x1b[1;97;48;2;55;68;90m"
 
 ANSI_BY_NAME = {
     "dim": DIM,
@@ -89,6 +90,7 @@ ANSI_BY_NAME = {
     "brightMagenta": BRIGHT_MAGENTA,
     "orange": ORANGE,
     "stampRed": STAMP_RED,
+    "slateBadge": SLATE_BADGE,
 }
 
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*m|\x1b\][^\x07\x1b]*(?:\x07|\x1b\\)")
@@ -209,7 +211,7 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
     "colors": {
         "model": "cyan",
-        "activePool": "stampRed",
+        "activePool": "slateBadge",
         "project": "yellow",
         "git": "magenta",
         "gitBranch": "cyan",
@@ -2254,12 +2256,15 @@ def _format_pool_parts(
     colors: dict[str, Any],
 ) -> tuple[str, list[str]]:
     is_remaining = mode != "used"
-    tag_text = f"[{pool_label}]"
     if is_active:
-        active_ansi = resolve_ansi(colors.get("activePool"), STAMP_RED)
-        lbl = f"\x1b[1m{active_ansi}{tag_text}{RESET}"
+        active_val = colors.get("activePool", "slateBadge")
+        if active_val == "slateBadge" or not active_val:
+            lbl = f"{SLATE_BADGE} {pool_label} {RESET}"
+        else:
+            active_ansi = resolve_ansi(active_val, SLATE_BADGE)
+            lbl = f"\x1b[1m{active_ansi}[{pool_label}]{RESET}"
     else:
-        lbl = c_label(tag_text, colors)
+        lbl = c_label(f"[{pool_label}]", colors)
 
     buckets: list[str] = []
     ordered_buckets = [b for b in ("5h", "1d", "7d") if b in pool_data]

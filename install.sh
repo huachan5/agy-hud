@@ -133,7 +133,8 @@ if os.path.isfile(target_cfg):
     if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
         user_cfg["colors"] = dict(default_cfg["colors"])
     elif isinstance(user_cfg.get("colors"), dict):
-        user_cfg["colors"].setdefault("activePool", "stampRed")
+        if user_cfg["colors"].get("activePool") in (None, "", "stampRed"):
+            user_cfg["colors"]["activePool"] = "slateBadge"
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg
