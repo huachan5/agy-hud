@@ -259,6 +259,19 @@ _R2_CONSOLE_STYLE: dict[str, Any] = {
     "todoR2Colors": True,
 }
 
+_R3_QUARTZ_STYLE: dict[str, Any] = {
+    **_R2_CONSOLE_STYLE,
+    "separator": "  ",
+    "headerDivider": " │ ",
+    "envSeparator": " / ",
+    "toolsGroupDivider": " │ ",
+    "toolsItemSeparator": "  ",
+    "quotaGlyphThreshold": True,
+    "contextGlyphThreshold": True,
+    "quotaPoolLabelGap": 3,
+    "quotaBucketGap": 3,
+}
+
 THEME_PRESETS: dict[str, dict[str, Any]] = {
     "appleVibrancy": {
         "style": {
@@ -374,6 +387,45 @@ THEME_PRESETS: dict[str, dict[str, Any]] = {
             "barEmpty": "─",
         },
     },
+    "quartzTeal": {
+        "display": {
+            "showQuotaBars": True,
+        },
+        "style": dict(_R3_QUARTZ_STYLE),
+        "colors": {
+            "model": "#0F172A",
+            "modelPrefix": "#0F6B43",
+            "project": "#334155",
+            "git": "#526071",
+            "gitBranch": "#334155",
+            "poolBadge": "#526071",
+            "context": "#334155",
+            "contextValue": "#0F172A",
+            "usage": "#0F172A",
+            "usageWarning": "#9A5204",
+            "warning": "#9A5204",
+            "critical": "#B91C1C",
+            "success": "#0F6B43",
+            "label": "#526071",
+            "envMuted": "#5B6878",
+            "separator": "#6E7D90",
+            "barTrack": "#6E7D90",
+            "quotaBarFill": "#0B635C",
+            "quotaBarFillInactive": "#334155",
+            "quotaBarTrackActive": "#6E7D90",
+            "quotaBarTrackInactive": "#6E7D90",
+            "toolRunning": "#0F172A",
+            "toolDone": "#334155",
+            "activePool": "quartzSpine",
+            "activePoolAccent": "#0B635C",
+            "activePoolLabel": "#526071",
+            "activePoolDim": "#526071",
+            "inactivePool": "#526071",
+            "custom": "#9A5204",
+            "barFilled": "━",
+            "barEmpty": "┄",
+        },
+    },
 }
 
 
@@ -471,8 +523,10 @@ def _format_separator(config: dict[str, Any], default_sep: str) -> str:
     raw_sep = style.get("separator")
     if not raw_sep:
         return default_sep
-    sep_str = str(raw_sep)
-    colors = config.get("colors") or {}
+    return _color_separator(str(raw_sep), config.get("colors") or {})
+
+
+def _color_separator(sep_str: str, colors: dict[str, Any]) -> str:
     sep_color = colors.get("separator")
     if not sep_color:
         return sep_str
@@ -577,11 +631,17 @@ def get_terminal_width(config: dict[str, Any], data: dict[str, Any] | None = Non
     return 0
 
 
-def wrap_line(line: str, max_width: int) -> list[str]:
+def wrap_line(line: str, max_width: int, *, extended_separators: bool = True) -> list[str]:
     if max_width <= 0 or visual_width(line) <= max_width:
         return [line]
-    # Split on top-level separators while preserving colors
-    tokens = re.split(r"( │ | \| |  (?:\x1b\[[0-9;]*m)*·(?:\x1b\[[0-9;]*m)*  )", line)
+    sgr = r"(?:\x1b\[[0-9;]*m)*"
+    dividers = r" │ | \| "
+    if extended_separators:
+        # A footer separator colors its surrounding spaces too. Match its own
+        # SGR pair without swallowing the reset/color of either adjacent item.
+        whole = r"(?:\x1b\[(?!0m)[0-9;]+m)+ [│|/] \x1b\[0m"
+        dividers = rf"{whole}| {sgr}[│|/]{sgr} "
+    tokens = re.split(rf"({dividers}|  {sgr}·{sgr}  )", line)
     if len(tokens) <= 1:
         return [line]
     lines: list[str] = []
@@ -1995,6 +2055,7 @@ def _parse_quota_bucket(bucket: Any, now: float) -> dict[str, Any] | None:
         "remaining_percentage": rem_pct,
         "refreshes_in": reset_str,
         "reset_at_ts": reset_at_ts,
+        "reset_due": reset_secs == 0 and reset_at_ts is None,
     }
 
 
@@ -2429,8 +2490,10 @@ def render_project_line(
         elif st == "error":
             parts.append(colorize("⚠ error", resolve_ansi(colors.get("critical"), RED)))
 
+    header_divider = style.get("headerDivider")
+    right_parts: list[str] = [] if header_divider else parts
     if inline_context_seg:
-        parts.append(inline_context_seg)
+        right_parts.append(inline_context_seg)
 
     # 5. Session duration
     if display.get("showDuration", True):
@@ -2440,9 +2503,14 @@ def render_project_line(
             start_ts = get_or_record_session_start(conv_id, now)
         dur = format_duration_seconds(now - start_ts)
         dur_txt = dur if style.get("durationNoIcon", False) else f"⏱ {dur}"
-        parts.append(c_label(dur_txt, colors))
+        right_parts.append(c_label(dur_txt, colors))
 
-    return _format_separator(config, " │ ").join(parts)
+    sep = _format_separator(config, " │ ")
+    if header_divider and parts and right_parts:
+        return _color_separator(str(header_divider), colors).join(
+            (sep.join(parts), sep.join(right_parts))
+        )
+    return sep.join(parts or right_parts)
 
 
 def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], config: dict[str, Any]) -> str:
@@ -2487,7 +2555,13 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     else:
         val_text = f"{round(used_pct)}%"
     warn = float(display.get("contextWarningThreshold", 70))
-    if used_pct < warn and colors.get("contextValue"):
+    crit = float(display.get("contextCriticalThreshold", 85))
+    glyphs = style.get("contextGlyphThreshold", False)
+    if glyphs and (used_pct >= crit or used_pct >= warn):
+        glyph = "!" if used_pct >= crit else "△"
+        value, gap, breakdown = val_text.partition(" (")
+        val_display = f"\x1b[1m{val_ansi}{value}{glyph}{gap}{breakdown}{RESET}"
+    elif used_pct < warn and colors.get("contextValue"):
         ctx_val_ansi = resolve_ansi(colors.get("contextValue"), val_ansi)
         val_display = f"\x1b[1m{ctx_val_ansi}{val_text}{RESET}"
     else:
@@ -2500,7 +2574,6 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     else:
         seg = f"{lbl} {val_display}"
 
-    crit = float(display.get("contextCriticalThreshold", 85))
     if display.get("showTokenBreakdown", True) and used_pct >= crit:
         cur = cw.get("current_usage") if isinstance(cw.get("current_usage"), dict) else {}
         in_t = int(cur.get("input_tokens") or cw.get("total_input_tokens") or transcript.get("total_input_tokens") or 0)
@@ -2522,6 +2595,7 @@ def _format_pool_parts(
     show_bars: bool,
     colors: dict[str, Any],
     style: dict[str, Any] | None = None,
+    bucket_order: list[str] | None = None,
 ) -> tuple[str, list[str]]:
     st = style or {}
     q_bar_w = int(st.get("quotaBarWidth") or 6)
@@ -2530,7 +2604,17 @@ def _format_pool_parts(
     is_remaining = mode != "used"
     is_ice_vibrancy = colors.get("activePool") == "iceVibrancy"
 
-    if is_ice_vibrancy:
+    is_quartz_spine = colors.get("activePool") == "quartzSpine"
+    glyphs = st.get("quotaGlyphThreshold", False)
+    if is_quartz_spine:
+        inactive_ansi = resolve_ansi(colors.get("inactivePool") or "#526071", DIM)
+        if is_active:
+            accent_ansi = resolve_ansi(colors.get("activePoolAccent") or "#0B635C", GREEN)
+            lbl = f"{accent_ansi}┃{RESET} \x1b[1m{accent_ansi}{pool_label}{RESET}"
+        else:
+            track_ansi = resolve_ansi(colors.get("barTrack"), DIM)
+            lbl = f"{track_ansi}┆{RESET} {colorize(pool_label, inactive_ansi)}"
+    elif is_ice_vibrancy:
         if is_active:
             accent_ansi = resolve_ansi(colors.get("activePoolAccent"), "\x1b[38;2;24;86;255m")
             lbl = f"{accent_ansi}▎{RESET} \x1b[1m{accent_ansi}{pool_label}{RESET}"
@@ -2550,9 +2634,10 @@ def _format_pool_parts(
     buckets: list[str] = []
     ordered_buckets = [b for b in ("5h", "1d", "7d") if b in pool_data]
     ordered_buckets.extend(sorted(b for b in pool_data if b not in ("5h", "1d", "7d")))
-    for bucket_name in ordered_buckets:
+    for bucket_name in bucket_order if bucket_order is not None else ordered_buckets:
         info = pool_data.get(bucket_name)
         if not info:
+            buckets.append("")
             continue
         rem = float(info["remaining_percentage"])
         if is_remaining:
@@ -2561,11 +2646,31 @@ def _format_pool_parts(
         else:
             pct_val = max(0, min(100, round(100.0 - rem)))
             ansi = quota_used_ansi(pct_val, colors)
-        bar_str = f"{render_quota_mini_bar(pct_val, is_remaining, colors, width=q_bar_w, is_active=is_active)} " if show_bars else ""
-        rst = str(info.get("refreshes_in") or "")
+        if glyphs:
+            # The percentage is rounded only for display, never for alert severity.
+            used_pct = 100.0 - rem
+            ansi = quota_used_ansi(used_pct, colors)
+            bar_pct = rem if is_remaining else used_pct
+        else:
+            bar_pct = pct_val
+        bar_str = f"{render_quota_mini_bar(bar_pct, is_remaining, colors, width=q_bar_w, is_active=is_active)} " if show_bars else ""
+        rst = str(info.get("refreshes_in") or ("now" if is_quartz_spine and info.get("reset_due") else ""))
         b_key = bucket_name if no_colon else f"{bucket_name}:"
-        pct_txt = f"{pct_val:>2d}%" if pad_pct else f"{pct_val}%"
-        if is_ice_vibrancy:
+        pct_width = 3 if glyphs else 2
+        pct_txt = f"{pct_val:>{pct_width}d}%" if pad_pct else f"{pct_val}%"
+        if glyphs:
+            glyph = "!" if used_pct >= 90 else "△" if used_pct >= 75 else " "
+            if rst or glyph != " ":
+                pct_txt += glyph
+        if is_quartz_spine:
+            label_ansi = resolve_ansi(colors.get("activePoolLabel"), inactive_ansi) if is_active else inactive_ansi
+            reset_ansi = resolve_ansi(colors.get("activePoolDim"), inactive_ansi) if is_active else inactive_ansi
+            emphasized = is_active or (glyphs and used_pct >= 75)
+            pct_ansi = f"\x1b[1m{ansi}" if emphasized else inactive_ansi
+            s = f"{colorize(b_key, label_ansi)} {bar_str}{colorize(pct_txt, pct_ansi)}"
+            if rst:
+                s += f" {colorize(f'({rst})', reset_ansi)}"
+        elif is_ice_vibrancy:
             if is_active:
                 bucket_lbl = colorize(b_key, resolve_ansi(colors.get("activePoolLabel"), "\x1b[38;2;71;85;105m"))
                 s = f"{bucket_lbl} {bar_str}\x1b[1m{ansi}{pct_txt}{RESET}"
@@ -2586,6 +2691,8 @@ def _format_pool_parts(
                 rst_str = f"{SLATE_ROW_DIM}({rst}){RESET}" if is_active else c_label(f"({rst})", colors)
                 s += f" {rst_str}"
         buckets.append(s)
+    while buckets and not buckets[-1]:
+        buckets.pop()
     return (lbl, buckets) if buckets else ("", [])
 
 
@@ -2614,6 +2721,7 @@ def _format_pool_string(
 def _align_pool_rows(
     rows: list[tuple[str, list[str], bool]],
     colors: dict[str, Any] | None = None,
+    style: dict[str, Any] | None = None,
 ) -> list[str]:
     if not rows:
         return []
@@ -2624,21 +2732,26 @@ def _align_pool_rows(
         for idx, b_str in enumerate(buckets):
             col_widths[idx] = max(col_widths[idx], visual_width(b_str))
 
-    is_ice_vibrancy = isinstance(colors, dict) and colors.get("activePool") == "iceVibrancy"
+    tag_gap = int((style or {}).get("quotaPoolLabelGap") or 2)
+    bucket_gap = int((style or {}).get("quotaBucketGap") or 2)
+    is_quartz_spine = (colors or {}).get("activePool") == "quartzSpine"
+    is_ice_vibrancy = (colors or {}).get("activePool") == "iceVibrancy"
     row_bg = resolve_bg_ansi(colors.get("activePoolBg"), "\x1b[48;2;235;243;255m") if is_ice_vibrancy else SLATE_ROW_BG
 
     lines: list[str] = []
     for lbl, buckets, is_active in rows:
-        tag_pad = max_tag_w - visual_width(lbl) + 2
+        tag_pad = max_tag_w - visual_width(lbl) + tag_gap
         row_parts = [f"{lbl}{' ' * tag_pad}"]
         for idx, b_str in enumerate(buckets):
             if idx < len(buckets) - 1:
-                b_pad = col_widths[idx] - visual_width(b_str) + 2
+                b_pad = col_widths[idx] - visual_width(b_str) + bucket_gap
                 row_parts.append(f"{b_str}{' ' * b_pad}")
             else:
                 row_parts.append(b_str)
         content = "".join(row_parts)
-        if is_active:
+        if is_quartz_spine:
+            lines.append(content)
+        elif is_active:
             # Keep background continuous across inner RESETs
             painted = content.replace(RESET, f"{RESET}{row_bg}")
             if is_ice_vibrancy:
@@ -2784,6 +2897,13 @@ def render_usage_blocks(
                     order.append(k)
             chosen = [k for k in order if stdin_pools.get(k)]
 
+        bucket_order = None
+        if colors.get("activePool") == "quartzSpine":
+            names = {bucket for k in chosen for bucket in stdin_pools[k]}
+            standard = ("5h", "1d", "7d")
+            bucket_order = [name for name in standard if name in names]
+            bucket_order.extend(sorted(names.difference(standard)))
+
         for k in chosen:
             label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
             is_act = (k == active_key)
@@ -2795,6 +2915,7 @@ def render_usage_blocks(
                 show_bars=show_bars,
                 colors=colors,
                 style=config.get("style"),
+                bucket_order=bucket_order,
             )
             if buckets:
                 pool_rows.append((lbl, buckets, is_act))
@@ -2826,7 +2947,7 @@ def render_usage_blocks(
         if in_t or out_t:
             inline_segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
 
-    aligned_pools = _align_pool_rows(pool_rows, colors=colors)
+    aligned_pools = _align_pool_rows(pool_rows, colors=colors, style=config.get("style"))
     alert = _render_pool_alert(data, stdin_pools, agy_quota_fallback, pool_ctx, active_key, config, now_ts)
     if alert:
         if (config.get("style") or {}).get("dedicatedAlertLine", False):
@@ -2880,7 +3001,9 @@ def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> s
     if not parts:
         return ""
     indent = str(style.get("envIndent") or "")
-    return f"{indent}{_format_separator(config, ' | ').join(parts)}"
+    env_separator = style.get("envSeparator")
+    sep = fmt_item(str(env_separator)) if env_separator else _format_separator(config, " | ")
+    return f"{indent}{sep.join(parts)}"
 
 
 def _format_tool_name(name: str, display: dict[str, Any]) -> str:
@@ -2936,6 +3059,11 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
             target_str = c_label(f": {target}", colors) if target else ""
             parts.append(f"{colorize('◐', warn_ansi)} {colorize(tname, usage_ansi)}{target_str}")
 
+    group_divider = style.get("toolsGroupDivider")
+    running_parts = parts
+    if group_divider:
+        parts = []
+
     counts: dict[str, int] = {}
     for tool in completed:
         tname = _format_tool_name(str(tool["name"]), display)
@@ -2961,6 +3089,10 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
         else:
             parts.append(c_label(more_txt, colors))
 
+    if group_divider:
+        item_sep = str(style.get("toolsItemSeparator", "  "))
+        groups = [item_sep.join(group) for group in (running_parts, parts) if group]
+        return _color_separator(str(group_divider), colors).join(groups)
     return _format_separator(config, " | ").join(parts)
 
 
@@ -3406,10 +3538,12 @@ def render_hud(
         raw_lines.extend(activity_lines)
 
     term_w = get_terminal_width(cfg, data=data)
+    style = cfg.get("style") or {}
+    extended_separators = any(style.get(key) for key in ("headerDivider", "envSeparator", "toolsGroupDivider"))
     final_lines: list[str] = []
     for ln in raw_lines:
         for sub in ln.split("\n"):
-            for wrapped in wrap_line(sub, term_w):
+            for wrapped in wrap_line(sub, term_w, extended_separators=extended_separators):
                 final_lines.append(f"{RESET}{wrapped}")
 
     return "\n".join(final_lines)

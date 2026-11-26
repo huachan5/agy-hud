@@ -1346,6 +1346,156 @@ class TestAgyHud(unittest.TestCase):
                 hud.SUBAGENT_STATE_FILE = old_sub_state
                 hud.SESSION_STARTS_FILE = old_sess_starts
 
+    def test_quartz_teal_theme(self):
+        cfg = hud.build_config({"theme": "quartzTeal", "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
+            "context_window": {"used_percentage": 89},
+            "quota": {
+                "argon-5h": {"remaining_fraction": .21, "reset_in_seconds": 5520},
+                "argon-weekly": {"remaining_fraction": .68, "reset_in_seconds": 568800},
+                "3p-5h": {"remaining_fraction": 1, "reset_in_seconds": 0},
+                "3p-weekly": {"remaining_fraction": .05, "reset_in_seconds": 554400},
+            },
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            payload["cwd"] = tmp
+            (root / "AGENTS.md").write_text("# Rules", encoding="utf-8")
+            (root / ".agents").mkdir()
+            (root / ".agents/mcp_config.json").write_text(
+                '{"mcpServers":{"a":{},"b":{},"c":{}}}', encoding="utf-8",
+            )
+            with mock.patch.object(hud, "HOME_DIR", root):
+                rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+        lines = strip_ansi(rendered).splitlines()
+        self.assertEqual(len(lines), 4, lines)
+        head, active, inactive, footer = lines
+        teal, track, muted, env, warn, crit = (
+            "\x1b[38;2;11;99;92m", "\x1b[38;2;110;125;144m", "\x1b[38;2;82;96;113m",
+            "\x1b[38;2;91;104;120m", "\x1b[38;2;154;82;4m", "\x1b[38;2;185;28;28m",
+        )
+        self.assertNotIn("\x1b[48;", rendered)
+        self.assertTrue(active.startswith("┃ Gemini   5h ━┄┄┄┄  21%△"))
+        self.assertIn("68%  (6d 14h)", active)
+        self.assertTrue(inactive.startswith("┆ 3P"))
+        self.assertIn("100%  (now)", inactive)
+        self.assertEqual(active.index("5h "), inactive.index("5h "))
+        self.assertEqual(active.index("7d "), inactive.index("7d "))
+        self.assertEqual(hud.visual_width("△"), 1)
+        self.assertIn(f"{teal}┃{hud.RESET} \x1b[1m{teal}Gemini", rendered)
+        self.assertIn(f"{track}┆{hud.RESET} {muted}3P", rendered)
+        self.assertIn(f"{track}┄", rendered)
+        self.assertIn(f"\x1b[1m{warn} 21%△", rendered)
+        self.assertIn(f"\x1b[1m{crit}  5%!", rendered)
+        self.assertIn(f"\x1b[1m{crit}89%!", rendered)
+        self.assertIn(" │ 上下文 ", head)
+        self.assertNotIn("·", head)
+        self.assertEqual(footer, "  1 AGENTS / 3 MCPs")
+        self.assertIn(f"  {env}1 AGENTS{hud.RESET}{env} / ", rendered)
+
+    def test_quartz_teal_tool_groups_and_colored_wrap(self):
+        cfg = hud.build_config({"theme": "quartzTeal", "maxWidth": 60})
+        transcript = {"tools": [
+            {"name": "run_command", "status": "running", "target": "x" * 45},
+            {"name": "read_file", "status": "completed"},
+            {"name": "edit_file", "status": "completed"},
+        ]}
+        tools = hud.render_tools_line(transcript, cfg)
+        self.assertIn(" \x1b[38;2;110;125;144m│\x1b[0m ", tools)
+        self.assertEqual(strip_ansi(tools).count("✓"), 1)
+        left, right = hud.wrap_line(tools, 60)
+        self.assertTrue(left.endswith(hud.RESET))
+        self.assertTrue(right.startswith("\x1b[38;2;15;107;67m✓"))
+        footer = hud.render_environment_line({
+            "agentsMdCount": 123456789, "rulesCount": 123456789,
+            "mcpCount": 123456789, "skillsCount": 123456789, "hooksCount": 123456789,
+        }, cfg)
+        for line, delim in ((tools, " │ "), (footer, " / ")):
+            wrapped = hud.wrap_line(line, hud.get_terminal_width(cfg))
+            self.assertGreater(len(wrapped), 1)
+            self.assertTrue(all(hud.visual_width(row) <= 60 for row in wrapped))
+            self.assertEqual(delim.join(map(strip_ansi, wrapped)), strip_ansi(line))
+
+    def test_legacy_themes_do_not_wrap_inside_slash_separated_models(self):
+        title = f"{'a' * 29} / {'b' * 29}"
+        for theme in ("default", "appleVibrancy", "mintlifyGlass", "appleSystemBlue"):
+            with self.subTest(theme=theme):
+                cfg = hud.build_config({"theme": theme, "maxWidth": 60})
+                payload = {"model": {"display_name": title}, "quota": SAMPLE_QUOTA}
+                rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+                self.assertIn(title, strip_ansi(rendered))
+
+    def test_quartz_teal_alert_and_failed_agent(self):
+        import os
+
+        now = hud.parse_iso_timestamp("2026-11-26T12:00:00Z")
+        cfg = hud.build_config({"theme": "quartzTeal", "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Argon (High)"},
+            "agent_state": "error",
+            "email": "main@example.test",
+            "context_window": {"used_percentage": 89, "total_input_tokens": 178000,
+                               "total_output_tokens": 14000},
+            "sandbox": {"enabled": True},
+            "quota": {"gemini-5h": {"remaining_fraction": .04, "reset_in_seconds": 4320}},
+            "subagents": [{"conversation_id": "failed", "role": "Test Runner", "model": "flash",
+                           "status": "error", "description": "unittest failed (1 error)",
+                           "started_at": "2026-11-26T11:59:51Z", "ended_at": "2026-11-26T12:00:00Z"}],
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            db = root / "pool.db"
+            self._create_pool_db(
+                db,
+                main_hash=hud._pool_email_identity("main@example.test")[1],
+                backup_row={
+                    "email_hash": hud._pool_email_identity("backup@example.test")[1],
+                    "gemini_5h_remaining": .94,
+                    "gemini_5h_reset_at": "2026-11-26T15:00:00Z",
+                    "gemini_7d_remaining": .90,
+                    "quota_updated_at": "2026-11-26T11:58:00Z",
+                },
+            )
+            env = {"AGY_POOL_THREAD_ID": "T1", "AGY_POOL_SEGMENT_ID": "T1-seg1",
+                   "AGY_POOL_ACCOUNT": "main", "AGY_POOL_DB": str(db)}
+            with (mock.patch.dict(os.environ, env), mock.patch.object(hud, "HOME_DIR", root),
+                  mock.patch.object(hud, "SUBAGENT_STATE_FILE", root / "subagents.json")):
+                rendered = hud.render_hud(payload, cfg, now=now, allow_bg_refresh=False)
+        head, quota, alert, agent = strip_ansi(rendered).splitlines()
+        self.assertIn("[T1·main·#1]", head)
+        self.assertIn("[sandbox] │ 上下文", head)
+        self.assertIn("89%! (输入: 178k, 输出: 14k)", head)
+        self.assertTrue(quota.startswith("┃ Gemini"))
+        self.assertEqual(alert, "⚠ 建议切换 backup（94%·2m前）")
+        self.assertTrue(agent.startswith("✗ Test Runner"))
+        self.assertIn("\x1b[1m\x1b[38;2;185;28;28mTest Runner", rendered)
+
+    def test_quartz_teal_aligns_weekly_quota_even_without_an_inactive_5h_bucket(self):
+        data = {"model": {"id": "gemini-4-neon"}}
+        quota = {"gemini": {"5h": {"remaining_percentage": 82}, "7d": {"remaining_percentage": 88}},
+                 "3p": {"7d": {"remaining_percentage": 5}}}
+        cfg = hud.build_config({"theme": "quartzTeal"})
+        _, rows = hud.render_usage_blocks(data, quota, {}, cfg)
+        active, inactive = map(strip_ansi, rows)
+        self.assertNotIn("5h", inactive)
+        self.assertEqual(active.index("7d "), inactive.index("7d "))
+
+    def test_quartz_teal_fractional_quota_thresholds_match_the_bar(self):
+        quota = {"gemini": {"5h": {"remaining_percentage": 25},
+                            "7d": {"remaining_percentage": 10.1}}}
+        data = {"model": {"id": "gemini-4-neon"}}
+        for mode, expected in (("remaining", ("25%△", "10%△")),
+                               ("used", ("75%△", "90%△"))):
+            with self.subTest(mode=mode):
+                cfg = hud.build_config({"theme": "quartzTeal", "display": {"usageValue": mode}})
+                _, (row,) = hud.render_usage_blocks(data, quota, {}, cfg)
+                self.assertFalse(strip_ansi(row).endswith(" "))
+                self.assertEqual(row.count("\x1b[38;2;154;82;4m"), 4)
+                self.assertNotIn("\x1b[38;2;185;28;28m", row)
+                for value in expected:
+                    self.assertIn(value, strip_ansi(row))
+
 
 if __name__ == "__main__":
     unittest.main()

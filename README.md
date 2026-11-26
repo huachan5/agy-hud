@@ -23,7 +23,11 @@
 - **第 5 行（按需）**：子 Agent 实时追踪（融合 AGY 原生 `stdin.subagents` + 父子 `transcript.jsonl` + `/swarm` worker，展示角色、实际模型、任务摘要、真实耗时与完成态保留，默认保留 `agentCompletedRetentionSeconds: 60` 秒）。
 - **第 6 行（按需）**：Todo 任务进度（优先解析当前会话 `brain/<conv_id>/task.md` 复选框进度，支持 `[x]` / `[/]` / `[ ]`）。
 
-## 主题预设与 macOS Otty R2 浅色玻璃 UI
+## 主题预设与 macOS Otty 浅色玻璃 UI
+
+![agy-hud quartzTeal（R3）全六态设计图](./docs/ui-spec-r3.png)
+
+[查看 R2 与 R3 的视觉对比](./docs/ui-spec-r3-comparison.png)。
 
 ![agy-hud R2 完整交互与全状态 UI 设计图](./docs/ui-spec-r2.png)
 
@@ -31,7 +35,8 @@
 
 | 主题名 (`theme`) | 定位与适用场景 | 核心视觉特点 |
 | :--- | :--- | :--- |
-| `appleSystemBlue` | **推荐 · macOS Otty 浅色玻璃（R2）** | 2 格左脊齐平、`●` 实时状态灯、`#0066CC` 仅聚焦活跃池、浅冰底 `#EBF4FF`、动态上移静态沉底 |
+| `quartzTeal` | **推荐 · macOS Otty R3「蚀刻石英仪」** | 无配额行背景色，`┃` / `┆` 区分活跃池与非活跃池，`△` / `!` 提示预警与危急 |
+| `appleSystemBlue` | macOS Otty 浅色玻璃（R2） | 2 格左脊齐平、`●` 实时状态灯、`#0066CC` 仅聚焦活跃池、浅冰底 `#EBF4FF`、动态上移静态沉底 |
 | `mintlifyGlass` | 浅色玻璃薄荷对比方案 | 薄荷绿 `#009975` 强调色、薄荷雾活跃行 `#E6FAF5`、5 格双池迷你进度条 |
 | `appleVibrancy` | Apple 浅色玻璃过渡方案 | 品红模型名 + 藏青项目路径 + `#1856FF` 浅冰活跃池 |
 | `default` | 经典深色 CLI 终端样式 | 兼容传统终端底色的经典暗色布局 |
@@ -40,7 +45,7 @@
 
 ```json
 {
-  "theme": "appleSystemBlue"
+  "theme": "quartzTeal"
 }
 ```
 
