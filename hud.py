@@ -1942,10 +1942,8 @@ def load_agy_quota(model_name: str, data: dict[str, Any], allow_bg_refresh: bool
 
 
 THIRD_PARTY_MODEL_RE = re.compile(r"(?:claude|gpt|anthropic|openai|\bo1\b|\bo3\b|3p)", re.IGNORECASE)
-ARGON_MODEL_RE = re.compile(r"\bargon\b", re.IGNORECASE)
 POOL_DISPLAY_LABELS = {
     "gemini": "Gemini",
-    "argon": "Argon",
     "3p": "3P",
 }
 _DYNAMIC_QUOTA_KEY_RE = re.compile(r"^([a-z0-9][a-z0-9_.-]*?)-(5h|1d|daily|weekly|7d)$", re.IGNORECASE)
@@ -1953,10 +1951,6 @@ _DYNAMIC_QUOTA_KEY_RE = re.compile(r"^([a-z0-9][a-z0-9_.-]*?)-(5h|1d|daily|weekl
 
 def is_third_party_model(model_id: str = "", model_name: str = "") -> bool:
     return bool(THIRD_PARTY_MODEL_RE.search(f"{model_id} {model_name}"))
-
-
-def is_argon_model(model_id: str = "", model_name: str = "") -> bool:
-    return bool(ARGON_MODEL_RE.search(f"{model_id} {model_name}"))
 
 
 def _parse_quota_bucket(bucket: Any, now: float) -> dict[str, Any] | None:
@@ -2021,10 +2015,10 @@ def _classify_quota_key(raw_key: str) -> tuple[str, str] | None:
 
     if "argon" in key:
         if "5h" in key or "hourly" in key:
-            return ("argon", "5h")
+            return ("gemini", "5h")
         if "1d" in key or "daily" in key:
-            return ("argon", "1d")
-        return ("argon", "7d")
+            return ("gemini", "1d")
+        return ("gemini", "7d")
 
     m = _DYNAMIC_QUOTA_KEY_RE.fullmatch(key)
     if m:
@@ -2035,14 +2029,16 @@ def _classify_quota_key(raw_key: str) -> tuple[str, str] | None:
 
 
 def parse_stdin_quota_pools(data: dict[str, Any], now: float) -> dict[str, dict[str, dict[str, Any]]]:
-    """Parse AGY's native quota pools (gemini, argon, 3p, and dynamic pools) from stdin.quota."""
+    """Parse AGY's native quota pools (gemini, 3p, and dynamic pools; legacy argon keys merge into gemini)."""
     quota = data.get("quota")
     if not isinstance(quota, dict):
         return {}
 
     pools: dict[str, dict[str, dict[str, Any]]] = {}
+    legacy_slots: set[tuple[str, str]] = set()
     for raw_key, raw_bucket in quota.items():
-        classified = _classify_quota_key(str(raw_key))
+        key_str = str(raw_key)
+        classified = _classify_quota_key(key_str)
         if not classified:
             continue
         parsed = _parse_quota_bucket(raw_bucket, now)
@@ -2050,8 +2046,15 @@ def parse_stdin_quota_pools(data: dict[str, Any], now: float) -> dict[str, dict[
             continue
         pool_key, short_key = classified
         pool_data = pools.setdefault(pool_key, {})
-        if short_key not in pool_data:
+        is_legacy_argon = "argon" in key_str.lower()
+        slot = (pool_key, short_key)
+        if is_legacy_argon:
+            if short_key not in pool_data:
+                pool_data[short_key] = parsed
+                legacy_slots.add(slot)
+        elif short_key not in pool_data or slot in legacy_slots:
             pool_data[short_key] = parsed
+            legacy_slots.discard(slot)
     return pools
 
 
@@ -2060,8 +2063,6 @@ def _detect_active_quota_pool(
     model_name: str,
     stdin_pools: dict[str, dict[str, dict[str, Any]]],
 ) -> str:
-    if is_argon_model(model_id, model_name) and stdin_pools.get("argon"):
-        return "argon"
     if is_third_party_model(model_id, model_name):
         return "3p"
     return "gemini"
@@ -2774,11 +2775,11 @@ def render_usage_blocks(
             if stdin_pools.get(active_key):
                 chosen = [active_key]
             else:
-                first_avail = next((k for k in ("gemini", "argon", "3p", *stdin_pools.keys()) if stdin_pools.get(k)), "")
+                first_avail = next((k for k in ("gemini", "3p", *stdin_pools.keys()) if stdin_pools.get(k)), "")
                 chosen = [first_avail] if first_avail else []
         else:
             order = [active_key]
-            for k in ("gemini", "argon", "3p", *stdin_pools.keys()):
+            for k in ("gemini", "3p", *stdin_pools.keys()):
                 if k not in order:
                     order.append(k)
             chosen = [k for k in order if stdin_pools.get(k)]

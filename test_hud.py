@@ -735,23 +735,38 @@ class TestAgyHud(unittest.TestCase):
         finally:
             conn.close()
 
-    def test_argon_independent_quota_pool_and_ordering(self):
-        quota = dict(SAMPLE_QUOTA)
-        quota["gemini-argon-wtu-weekly"] = {"remaining_fraction": 0.84, "reset_in_seconds": 439200}
-        quota["3p-5h"] = {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True}
-        quota["3p-weekly"] = {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True}
-
-        payload_argon = {
-            "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
-            "context_window": {"used_percentage": 15.0},
-            "quota": quota,
+    def test_argon_merged_into_gemini_quota_pool(self):
+        # 1. Legacy argon key appears BEFORE standard gemini-weekly -> standard key still wins
+        quota_legacy_first = {
+            "gemini-argon-wtu-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 439200},
+            **SAMPLE_QUOTA,
+            "gemini-weekly": {"remaining_fraction": 0.88, "reset_in_seconds": 442800},
+            "3p-5h": {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True},
+            "3p-weekly": {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True},
         }
-        plain_argon = strip_ansi(hud.render_hud(payload_argon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
-        rows_argon = plain_argon.splitlines()
-        self.assertIn(" [Argon]   7d: 84% (5d 2h)", rows_argon[2])
-        self.assertIn(" [Gemini]  5h: 92%", rows_argon[3])
-        self.assertNotIn("[3P]", plain_argon)
+        # 2. Legacy argon key appears AFTER standard gemini-weekly -> standard key still wins
+        quota_std_first = {
+            **SAMPLE_QUOTA,
+            "gemini-weekly": {"remaining_fraction": 0.88, "reset_in_seconds": 442800},
+            "gemini-argon-wtu-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 439200},
+            "3p-5h": {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True},
+            "3p-weekly": {"remaining_fraction": 0.50, "reset_in_seconds": 3600, "disabled": True},
+        }
 
+        for quota in (quota_legacy_first, quota_std_first):
+            payload_argon = {
+                "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
+                "context_window": {"used_percentage": 15.0},
+                "quota": quota,
+            }
+            plain_argon = strip_ansi(hud.render_hud(payload_argon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
+            rows_argon = plain_argon.splitlines()
+            self.assertIn(" [Gemini]  5h: 92%", rows_argon[2])
+            self.assertIn("7d: 88%", rows_argon[2])
+            self.assertNotIn("[Argon]", plain_argon)
+            self.assertNotIn("[3P]", plain_argon)
+
+        # 3. Active 3P + legacy argon key + Neon model -> strictly 2 pool rows ([Gemini], [3P])
         payload_neon = {
             "model": {"display_name": "Gemini 4 Neon (High)", "id": "gemini-4-neon-high"},
             "context_window": {"used_percentage": 15.0},
@@ -760,8 +775,23 @@ class TestAgyHud(unittest.TestCase):
         plain_neon = strip_ansi(hud.render_hud(payload_neon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
         rows_neon = plain_neon.splitlines()
         self.assertTrue(rows_neon[2].startswith(" [Gemini]"))
-        self.assertTrue(rows_neon[3].startswith(" [Argon]"))
-        self.assertTrue(rows_neon[4].startswith(" [3P]"))
+        self.assertTrue(rows_neon[3].startswith(" [3P]"))
+        self.assertNotIn("[Argon]", plain_neon)
+
+        # 4. Only legacy argon weekly present (no gemini-weekly) -> merged into Gemini 7d slot
+        payload_only_legacy = {
+            "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
+            "context_window": {"used_percentage": 15.0},
+            "quota": {
+                "gemini-5h": SAMPLE_QUOTA["gemini-5h"],
+                "gemini-argon-wtu-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 439200},
+            },
+        }
+        plain_legacy = strip_ansi(hud.render_hud(payload_only_legacy, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
+        rows_legacy = plain_legacy.splitlines()
+        self.assertIn(" [Gemini]  5h: 92%", rows_legacy[2])
+        self.assertIn("7d: 84% (5d 2h)", rows_legacy[2])
+        self.assertNotIn("[Argon]", plain_legacy)
 
     def test_pool_unmanaged_and_corrupt_db_zero_regression(self):
         import os

@@ -15,7 +15,7 @@
 
 - **第 1 行**：模型名 + 思考强度图标（`○ low / ◔ medium / ◑ high / ◕ xhigh / ● max`）、托管线程徽章（`agy-pool` 联动时显示 `[T1·main·#1]`）、当前项目与 Git 分支（默认开启 `gitStatus.showFileStats` 显示 `!M +A ✘D ?U`）、会话标题（`conversation_title`）、会话时长。
 - **第 2 行**：中文上下文进度条（绿/黄/红阈值，支持 `contextValue` 切换 `percent` / `remaining` / `tokens` / `both`）+ **AGY 原生多模型配额池**：
-  - 直接读取 `agy` 传入的 `stdin.quota`，同时支持 **Gemini 池**（`gemini-5h` / `gemini-weekly`）、**Argon 独立池**（如 `gemini-argon-wtu-weekly` / `argon-5h` 等）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列），自动把当前模型所属配额池排在前面，并自动隐藏 `"disabled": true` 的配额池。
+  - 直接读取 `agy` 传入的 `stdin.quota`，采用 **Gemini 池**（`gemini-5h` / `gemini-weekly`，涵盖 Neon / Hydrogen / Argon 系列，历史 `argon` 键自动归并至 Gemini 池）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列）双池布局，自动将当前模型所属配额池排在首位高亮，并自动隐藏 `"disabled": true` 的配额池。
   - 可在 `config.json` 中切换 `quotaPools`（`"both"` 全池同显 / `"active"` 仅显示当前模型所在池）和 `usageValue`（`"remaining"` 显示剩余% / `"used"` 显示已用%）。
   - 在 `agy-pool` 托管会话下，支持红色账号不符告警（`⚠ 账号不符`）、低额度三态切换提醒（默认 `8%`，可在 `pool.lowQuotaThresholdPercent` 调整）以及 5 秒防抖回写 `pool.db`。
 - **第 3 行**：AGY 实际加载的 `AGENTS.md` / `GEMINI.md`、规则、MCP 服务、Skills 与钩子计数。
@@ -23,9 +23,36 @@
 - **第 5 行（按需）**：子 Agent 实时追踪（融合 AGY 原生 `stdin.subagents` + 父子 `transcript.jsonl` + `/swarm` worker，展示角色、实际模型、任务摘要、真实耗时与完成态保留，默认保留 `agentCompletedRetentionSeconds: 60` 秒）。
 - **第 6 行（按需）**：Todo 任务进度（优先解析当前会话 `brain/<conv_id>/task.md` 复选框进度，支持 `[x]` / `[/]` / `[ ]`）。
 
+## 主题预设与 macOS Otty R2 浅色玻璃 UI
+
+![agy-hud R2 完整交互与全状态 UI 设计图](./docs/ui-spec-r2.png)
+
+详细全状态规范与色值设计请查看 [docs/ui-spec-r2.md](./docs/ui-spec-r2.md)。
+
+| 主题名 (`theme`) | 定位与适用场景 | 核心视觉特点 |
+| :--- | :--- | :--- |
+| `appleSystemBlue` | **推荐 · macOS Otty 浅色玻璃（R2）** | 2 格左脊齐平、`●` 实时状态灯、`#0066CC` 仅聚焦活跃池、浅冰底 `#EBF4FF`、动态上移静态沉底 |
+| `mintlifyGlass` | 浅色玻璃薄荷对比方案 | 薄荷绿 `#009975` 强调色、薄荷雾活跃行 `#E6FAF5`、5 格双池迷你进度条 |
+| `appleVibrancy` | Apple 浅色玻璃过渡方案 | 品红模型名 + 藏青项目路径 + `#1856FF` 浅冰活跃池 |
+| `default` | 经典深色 CLI 终端样式 | 兼容传统终端底色的经典暗色布局 |
+
+在 `~/.antigravity/agy-hud/config.json` 中设置即可生效：
+
+```json
+{
+  "theme": "appleSystemBlue"
+}
+```
+
 ## 安装
 
-在 PowerShell 中运行：
+- **macOS / Linux**：
+
+```bash
+./install.sh
+```
+
+- **Windows（PowerShell）**：
 
 ```powershell
 .\agy-hud\install.ps1
