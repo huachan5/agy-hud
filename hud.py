@@ -77,7 +77,9 @@ BRIGHT_BLUE = "\x1b[94m"
 BRIGHT_MAGENTA = "\x1b[95m"
 ORANGE = "\x1b[38;5;208m"
 STAMP_RED = "\x1b[38;2;232;90;79m"
-SLATE_BADGE = "\x1b[1;97;48;2;55;68;90m"
+SLATE_BADGE = "\x1b[1;97;48;2;46;57;74m"
+SLATE_ROW_BG = "\x1b[48;2;46;57;74m"
+SLATE_ROW_DIM = "\x1b[38;2;165;176;196m"
 
 ANSI_BY_NAME = {
     "dim": DIM,
@@ -2259,9 +2261,9 @@ def _format_pool_parts(
     if is_active:
         active_val = colors.get("activePool", "slateBadge")
         if active_val == "slateBadge" or not active_val:
-            lbl = f"{SLATE_BADGE} {pool_label} {RESET}"
+            lbl = f"\x1b[1;97m[{pool_label}]{RESET}"
         else:
-            active_ansi = resolve_ansi(active_val, SLATE_BADGE)
+            active_ansi = resolve_ansi(active_val, "\x1b[97m")
             lbl = f"\x1b[1m{active_ansi}[{pool_label}]{RESET}"
     else:
         lbl = c_label(f"[{pool_label}]", colors)
@@ -2282,11 +2284,12 @@ def _format_pool_parts(
             ansi = quota_used_ansi(pct_val, colors)
         bar_str = f"{render_quota_mini_bar(pct_val, is_remaining, colors)} " if show_bars else ""
         rst = str(info.get("refreshes_in") or "")
-        bucket_lbl = f"{bucket_name}:" if is_active else c_label(f"{bucket_name}:", colors)
+        bucket_lbl = f"\x1b[97m{bucket_name}:{RESET}" if is_active else c_label(f"{bucket_name}:", colors)
         pct_ansi = ansi if (is_active or rem <= 20.0) else f"{DIM}{ansi}"
         s = f"{bucket_lbl} {bar_str}{pct_ansi}{pct_val}%{RESET}"
         if rst:
-            s += f" {c_label(f'({rst})', colors)}"
+            rst_str = f"{SLATE_ROW_DIM}({rst}){RESET}" if is_active else c_label(f"({rst})", colors)
+            s += f" {rst_str}"
         buckets.append(s)
     return (lbl, buckets) if buckets else ("", [])
 
@@ -2313,18 +2316,18 @@ def _format_pool_string(
     return f"{lbl} {' / '.join(buckets)}"
 
 
-def _align_pool_rows(rows: list[tuple[str, list[str]]]) -> list[str]:
+def _align_pool_rows(rows: list[tuple[str, list[str], bool]]) -> list[str]:
     if not rows:
         return []
-    max_tag_w = max(visual_width(lbl) for lbl, _ in rows)
-    max_cols = max(len(buckets) for _, buckets in rows)
+    max_tag_w = max(visual_width(lbl) for lbl, _, _ in rows)
+    max_cols = max(len(buckets) for _, buckets, _ in rows)
     col_widths = [0] * max_cols
-    for _, buckets in rows:
+    for _, buckets, _ in rows:
         for idx, b_str in enumerate(buckets):
             col_widths[idx] = max(col_widths[idx], visual_width(b_str))
 
     lines: list[str] = []
-    for lbl, buckets in rows:
+    for lbl, buckets, is_active in rows:
         tag_pad = max_tag_w - visual_width(lbl) + 2
         row_parts = [f"{lbl}{' ' * tag_pad}"]
         for idx, b_str in enumerate(buckets):
@@ -2333,7 +2336,13 @@ def _align_pool_rows(rows: list[tuple[str, list[str]]]) -> list[str]:
                 row_parts.append(f"{b_str}{' ' * b_pad}")
             else:
                 row_parts.append(b_str)
-        lines.append("".join(row_parts))
+        content = "".join(row_parts)
+        if is_active:
+            # Keep background continuous across inner RESETs
+            painted = content.replace(RESET, f"{RESET}{SLATE_ROW_BG}")
+            lines.append(f"{SLATE_ROW_BG} {painted} {RESET}")
+        else:
+            lines.append(f" {content}")
     return lines
 
 
@@ -2451,7 +2460,7 @@ def render_usage_blocks(
     active_key = _detect_active_quota_pool(model_id, raw_name, stdin_pools)
 
     inline_segments: list[str] = []
-    pool_rows: list[tuple[str, list[str]]] = []
+    pool_rows: list[tuple[str, list[str], bool]] = []
 
     if stdin_pools:
         if pool_mode == "active":
@@ -2469,16 +2478,17 @@ def render_usage_blocks(
 
         for k in chosen:
             label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
+            is_act = (k == active_key)
             lbl, buckets = _format_pool_parts(
                 label_text,
                 stdin_pools[k],
-                is_active=(k == active_key),
+                is_active=is_act,
                 mode=mode,
                 show_bars=show_bars,
                 colors=colors,
             )
             if buckets:
-                pool_rows.append((lbl, buckets))
+                pool_rows.append((lbl, buckets, is_act))
     elif "remaining_percentage" in agy_quota_fallback:
         rem = float(agy_quota_fallback["remaining_percentage"])
         if mode == "used":
