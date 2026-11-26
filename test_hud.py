@@ -1017,6 +1017,305 @@ class TestAgyHud(unittest.TestCase):
             )
             self.assertIn(hud.SLATE_ROW_BG, default_rendered)
 
+    def test_mintlify_glass_theme(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "claudespace"
+            root.mkdir()
+            (root / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+            conv_dir = tmp_path / "conv"
+            log_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+            log_path.parent.mkdir(parents=True)
+            lines = [
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-26T12:00:00Z",
+                    "tool_calls": [
+                        {"name": "read_file", "args": {"Path": "/tmp/a.py"}},
+                        {"name": "run_command", "args": {"CommandLine": "ls"}},
+                        {"name": "edit_file", "args": {"Path": "/tmp/a.py"}},
+                        {"name": "search_web", "args": {"query": "x"}},
+                        {"name": "write_file", "args": {"Path": "/tmp/b.py"}},
+                    ],
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "created_at": "2026-11-26T12:00:05Z",
+                },
+            ]
+            log_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+            cfg = hud.build_config({"theme": "mintlifyGlass"})
+            self.assertTrue(cfg["display"]["showQuotaBars"])
+            payload = {
+                "model": {"display_name": "Orchestrator (Neon)", "id": "gemini-4-neon"},
+                "agent_state": "idle",
+                "cwd": str(root),
+                "context_window": {"used_percentage": 24.0},
+                "quota": {
+                    "gemini-5h": {"remaining_fraction": 0.82, "reset_in_seconds": 15540},
+                    "gemini-weekly": {"remaining_fraction": 0.83, "reset_in_seconds": 579600},
+                    "3p-5h": {"remaining_fraction": 0.10, "reset_in_seconds": 7680},
+                    "3p-weekly": {"remaining_fraction": 0.05, "reset_in_seconds": 565200},
+                },
+                "transcript_path": str(log_path),
+            }
+            with mock.patch.object(hud, "HOME_DIR", tmp_path):
+                rendered = hud.render_hud(
+                    payload,
+                    cfg,
+                    now=hud.parse_iso_timestamp("2026-11-26T12:00:10Z"),
+                    allow_bg_refresh=False,
+                )
+
+            mint_bg = "\x1b[48;2;230;250;245m"
+            mint_fg = "\x1b[38;2;0;153;117m"
+            dot_fg = "\x1b[38;2;0;180;138m"
+            coral_red = "\x1b[38;2;212;86;86m"
+            self.assertIn(f"{dot_fg}● ", rendered)
+            self.assertIn(mint_bg, rendered)
+            self.assertIn(f"{mint_fg}▎", rendered)
+            self.assertIn(f"{coral_red}10%", rendered)
+            self.assertNotIn(hud.SLATE_ROW_BG, rendered)
+
+            plain_lines = strip_ansi(rendered).splitlines()
+            self.assertEqual(len(plain_lines), 5)
+            self.assertIn("上下文 ━━──────── 24%", plain_lines[0])
+            self.assertIn("5h ━━━━─ 82% (4h 19m)", plain_lines[1])
+            self.assertIn("7d ━━━━─ 83% (6d 17h)", plain_lines[1])
+            self.assertIn("5h ━──── 10% (2h 8m)", plain_lines[2])
+            self.assertIn("7d ─────  5% (6d 13h)", plain_lines[2])
+            self.assertEqual(plain_lines[1].index("5h "), plain_lines[2].index("5h "))
+            self.assertEqual(plain_lines[1].index("7d "), plain_lines[2].index("7d "))
+            self.assertIn("1 AGENTS", plain_lines[3])
+            self.assertNotIn("AGENTS.md", plain_lines[3])
+            self.assertEqual(plain_lines[4].count("✓"), 1)
+            self.assertTrue(plain_lines[4].endswith("+1"))
+            self.assertNotIn("more", plain_lines[4])
+
+    def test_apple_system_blue_theme(self):
+        import os
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            old_sub_state = hud.SUBAGENT_STATE_FILE
+            old_sess_starts = hud.SESSION_STARTS_FILE
+            hud.SUBAGENT_STATE_FILE = tmp_path / "subagent-state.json"
+            hud.SESSION_STARTS_FILE = tmp_path / "session-starts.json"
+            try:
+                root = tmp_path / "claudespace"
+                root.mkdir()
+                (root / "AGENTS.md").write_text("# rules\n", encoding="utf-8")
+                conv_dir = tmp_path / "conv"
+                log_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+                log_path.parent.mkdir(parents=True)
+                lines = [
+                    {
+                        "step_index": 1,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "DONE",
+                        "created_at": "2026-11-26T12:00:00Z",
+                        "tool_calls": [
+                            {"name": "read_file", "args": {"Path": "/tmp/a.py"}},
+                            {"name": "run_command", "args": {"CommandLine": "ls"}},
+                        ],
+                    },
+                    {
+                        "step_index": 2,
+                        "source": "MODEL",
+                        "type": "GENERIC",
+                        "status": "DONE",
+                        "created_at": "2026-11-26T12:00:05Z",
+                    },
+                ]
+                log_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+                cfg = hud.build_config({"theme": "appleSystemBlue"})
+                self.assertTrue(cfg["display"]["showQuotaBars"])
+                payload = {
+                    "model": {"display_name": "Orchestrator (Neon)", "id": "gemini-4-neon"},
+                    "agent_state": "idle",
+                    "cwd": str(root),
+                    "context_window": {"used_percentage": 24.0},
+                    "quota": {
+                        "gemini-5h": {"remaining_fraction": 0.82, "reset_in_seconds": 15540},
+                        "gemini-weekly": {"remaining_fraction": 0.83, "reset_in_seconds": 579600},
+                        "3p-5h": {"remaining_fraction": 0.10, "reset_in_seconds": 7680},
+                        "3p-weekly": {"remaining_fraction": 0.05, "reset_in_seconds": 565200},
+                    },
+                    "transcript_path": str(log_path),
+                }
+                with mock.patch.object(hud, "HOME_DIR", tmp_path):
+                    rendered = hud.render_hud(
+                        payload,
+                        cfg,
+                        now=hud.parse_iso_timestamp("2026-11-26T12:00:10Z"),
+                        allow_bg_refresh=False,
+                    )
+
+                idle_green = "\x1b[38;2;22;163;74m"
+                graphite = "\x1b[38;2;39;39;42m"
+                env_muted = "\x1b[38;2;140;149;159m"
+                self.assertIn(f"{idle_green}● ", rendered)
+                self.assertIn("\x1b[38;2;29;29;31mOrchestrator (Neon)", rendered)
+                self.assertIn("\x1b[38;2;72;72;74mclaudespace", rendered)
+                self.assertIn(f"{graphite}━━", rendered)
+                self.assertIn("\x1b[48;2;235;244;255m", rendered)
+                self.assertIn("\x1b[38;2;0;102;204m▎", rendered)
+                self.assertIn("\x1b[38;2;215;0;21m10%", rendered)
+                self.assertIn(f"  {env_muted}1 AGENTS", rendered)
+                self.assertNotIn("⏱", rendered)
+                self.assertNotIn(hud.SLATE_ROW_BG, rendered)
+
+                plain_lines = strip_ansi(rendered).splitlines()
+                self.assertEqual(len(plain_lines), 5)
+                self.assertEqual(plain_lines[1].index("5h "), plain_lines[2].index("5h "))
+                self.assertEqual(plain_lines[1].index("7d "), plain_lines[2].index("7d "))
+                self.assertEqual(plain_lines[3].count("✓"), 1)
+                self.assertTrue(plain_lines[4].startswith("  1 AGENTS"))
+
+                # 2. Working + Git + Subagents + Todos: amber dot, Col-2 aligned, env stays last
+                brain_dir = tmp_path / "conv"
+                (brain_dir / "task.md").write_text("- [x] Done step\n- [/] Build R2 UI\n- [ ] Verify\n", encoding="utf-8")
+                work_lines = list(lines)
+                work_lines.append(
+                    {
+                        "step_index": 3,
+                        "source": "MODEL",
+                        "type": "PLANNER_RESPONSE",
+                        "status": "RUNNING",
+                        "created_at": "2026-11-26T12:00:08Z",
+                        "tool_calls": [
+                            {"name": "run_command", "args": {"CommandLine": "python3 -m unittest test_hud.py"}},
+                        ],
+                    }
+                )
+                log_path.write_text("\n".join(json.dumps(x) for x in work_lines) + "\n", encoding="utf-8")
+                work_payload = {
+                    **payload,
+                    "model": {"display_name": "Gemini 4 Neon (High)", "id": "gemini-4-neon"},
+                    "agent_state": "working",
+                    "vcs": {"branch": "main", "dirty": True},
+                    "subagents": [
+                        {
+                            "conversation_id": "sub-1",
+                            "role": "Codebase Researcher",
+                            "model": "flash",
+                            "description": "Inspect quota alignment",
+                            "status": "running",
+                            "started_at": "2026-11-26T12:00:02Z",
+                        },
+                        {
+                            "conversation_id": "sub-2",
+                            "role": "Skill Installer",
+                            "model": "hydrogen",
+                            "description": "Validate skills",
+                            "status": "completed",
+                            "started_at": "2026-11-26T11:59:40Z",
+                            "ended_at": "2026-11-26T12:00:02Z",
+                        },
+                        {
+                            "conversation_id": "sub-3",
+                            "role": "Test Runner",
+                            "model": "flash",
+                            "description": "unittest failed",
+                            "status": "error",
+                            "started_at": "2026-11-26T11:59:55Z",
+                            "ended_at": "2026-11-26T12:00:04Z",
+                        },
+                    ],
+                }
+                porcelain = " M a.py\n M b.py\nA  c.py\n?? d.py\n"
+                with (
+                    mock.patch.object(hud, "HOME_DIR", tmp_path),
+                    mock.patch.object(hud.subprocess, "check_output", return_value=porcelain),
+                ):
+                    work_rendered = hud.render_hud(
+                        work_payload,
+                        cfg,
+                        now=hud.parse_iso_timestamp("2026-11-26T12:00:16Z"),
+                        allow_bg_refresh=False,
+                    )
+
+                amber = "\x1b[38;2;217;119;6m"
+                red = "\x1b[38;2;215;0;21m"
+                self.assertIn(f"{amber}● ", work_rendered)
+                self.assertIn(f"{idle_green}+1", work_rendered)
+                self.assertIn("\x1b[1m\x1b[38;2;29;29;31mShell:", work_rendered)
+                self.assertIn("\x1b[1m\x1b[38;2;29;29;31mCodebase Researcher", work_rendered)
+                self.assertIn(f"\x1b[1m{red}Test Runner", work_rendered)
+                work_plain = strip_ansi(work_rendered).splitlines()
+                self.assertIn("git:(main* !2 +1 ?1)", work_plain[0])
+                self.assertTrue(work_plain[3].startswith("◑ Shell:"))
+                self.assertTrue(work_plain[4].startswith("◐ Codebase Researcher"))
+                self.assertTrue(work_plain[5].startswith("✓ Skill Installer"))
+                self.assertTrue(work_plain[6].startswith("✗ Test Runner"))
+                self.assertTrue(work_plain[7].startswith("▸ Build R2 UI (1/3)"))
+                self.assertTrue(work_plain[-1].startswith("  1 AGENTS"))
+
+                # 3. Argon model merged into Gemini (2 pools only) + dedicated agy-pool alert + error state
+                main_hash = hud._pool_email_identity("main@example.test")[1]
+                backup_hash = hud._pool_email_identity("backup@example.test")[1]
+                now_ts = hud.parse_iso_timestamp("2026-11-26T12:00:00Z")
+                db = tmp_path / "pool.db"
+                self._create_pool_db(
+                    db,
+                    main_hash=main_hash,
+                    backup_row={
+                        "email_hash": backup_hash,
+                        "gemini_5h_remaining": 0.94,
+                        "gemini_5h_reset_at": "2026-11-26T15:00:00Z",
+                        "gemini_7d_remaining": 0.90,
+                        "quota_updated_at": "2026-11-26T11:58:00Z",
+                    },
+                )
+                pool_env = {
+                    "AGY_POOL_THREAD_ID": "T1",
+                    "AGY_POOL_SEGMENT_ID": "T1-seg1",
+                    "AGY_POOL_ACCOUNT": "main",
+                    "AGY_POOL_DB": str(db),
+                }
+                argon_alert_payload = {
+                    "model": {"display_name": "Gemini 4 Argon (High)", "id": "gemini-4-argon-high"},
+                    "agent_state": "error",
+                    "email": "main@example.test",
+                    "cwd": str(root),
+                    "context_window": {
+                        "used_percentage": 89.0,
+                        "total_input_tokens": 178000,
+                        "total_output_tokens": 14000,
+                    },
+                    "quota": {
+                        "gemini-5h": {"remaining_fraction": 0.04, "reset_in_seconds": 4320},
+                        "gemini-weekly": {"remaining_fraction": 0.62, "reset_in_seconds": 496800},
+                        "3p-5h": {"remaining_fraction": 0.58, "reset_in_seconds": 12000},
+                        "3p-weekly": {"remaining_fraction": 0.79, "reset_in_seconds": 554400},
+                    },
+                }
+                with mock.patch.dict(os.environ, pool_env), mock.patch.object(hud, "HOME_DIR", tmp_path):
+                    crit_rendered = hud.render_hud(argon_alert_payload, cfg, now=now_ts, allow_bg_refresh=False)
+                self.assertIn(f"{red}● ", crit_rendered)
+                self.assertIn("\x1b[38;2;110;119;129m[T1·main·#1]", crit_rendered)
+                # Inactive healthy 3P mini-bar stays muted #6E7781 instead of active blue
+                self.assertIn("\x1b[38;2;110;119;129m━━━", crit_rendered)
+                crit_plain = strip_ansi(crit_rendered).splitlines()
+                self.assertNotIn("Argon", "\n".join(crit_plain[1:]))
+                self.assertTrue(crit_plain[1].startswith("▎ Gemini"))
+                self.assertTrue(crit_plain[2].startswith("  3P"))
+                self.assertTrue(crit_plain[3].startswith("⚠ 建议切换 backup（94%·2m前）"))
+                self.assertNotIn("⚠ 建议切换", crit_plain[0])
+                self.assertTrue(crit_plain[-1].startswith("  1 AGENTS"))
+            finally:
+                hud.SUBAGENT_STATE_FILE = old_sub_state
+                hud.SESSION_STARTS_FILE = old_sess_starts
+
 
 if __name__ == "__main__":
     unittest.main()

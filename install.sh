@@ -107,6 +107,7 @@ if os.path.isfile(target_cfg):
     git_cfg = user_cfg.setdefault("gitStatus", {})
     if isinstance(git_cfg, dict):
         git_cfg.setdefault("showFileStats", True)
+    theme_name = str(user_cfg.get("theme") or "default").strip()
     disp = user_cfg.setdefault("display", {})
     if isinstance(disp, dict):
         for old_key in (
@@ -118,7 +119,8 @@ if os.path.isfile(target_cfg):
             disp.pop(old_key, None)
         disp.setdefault("quotaPools", "both")
         disp.setdefault("usageValue", "remaining")
-        disp.setdefault("showQuotaBars", False)
+        if theme_name in ("", "default"):
+            disp.setdefault("showQuotaBars", False)
         disp.setdefault("showSessionName", True)
         disp.setdefault("showTodos", True)
         disp.setdefault("agentCompletedRetentionSeconds", 60)
@@ -130,7 +132,6 @@ if os.path.isfile(target_cfg):
         pool_cfg.setdefault("syncLiveTelemetry", True)
         pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
     # Preserve user-customized colors dict while ensuring colors key exists if absent
-    theme_name = str(user_cfg.get("theme") or "default").strip()
     if theme_name in ("", "default"):
         if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
             user_cfg["colors"] = dict(default_cfg["colors"])
