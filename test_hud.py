@@ -925,6 +925,98 @@ class TestAgyHud(unittest.TestCase):
             self.assertAlmostEqual(acc[0], 0.72, places=3)
             self.assertAlmostEqual(acc[1], 0.65, places=3)
 
+    def test_apple_vibrancy_light_glass_theme(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            root = tmp_path / "claudespace"
+            root.mkdir()
+            conv_dir = tmp_path / "conv"
+            log_path = conv_dir / ".system_generated" / "logs" / "transcript.jsonl"
+            log_path.parent.mkdir(parents=True)
+            lines = [
+                {
+                    "step_index": 1,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "DONE",
+                    "created_at": "2026-11-26T12:00:00Z",
+                    "tool_calls": [
+                        {"name": "read_file", "args": {"Path": "/tmp/a.py"}},
+                    ],
+                },
+                {
+                    "step_index": 2,
+                    "source": "MODEL",
+                    "type": "GENERIC",
+                    "status": "DONE",
+                    "created_at": "2026-11-26T12:00:01Z",
+                },
+                {
+                    "step_index": 3,
+                    "source": "MODEL",
+                    "type": "PLANNER_RESPONSE",
+                    "status": "RUNNING",
+                    "created_at": "2026-11-26T12:00:02Z",
+                    "tool_calls": [
+                        {"name": "run_command", "args": {"CommandLine": "Verify agy-hud settings"}},
+                    ],
+                },
+            ]
+            log_path.write_text("\n".join(json.dumps(x) for x in lines) + "\n", encoding="utf-8")
+
+            cfg = hud.build_config({"theme": "appleVibrancy"})
+            payload = {
+                "model": {"display_name": "Gemini 4 Hydrogen (Medium)", "id": "gemini-4-hydrogen"},
+                "agent_state": "working",
+                "cwd": str(root),
+                "context_window": {"used_percentage": 4.0},
+                "quota": {
+                    "gemini-5h": {"remaining_fraction": 1.0, "reset_in_seconds": 17940},
+                    "gemini-weekly": {"remaining_fraction": 0.89, "reset_in_seconds": 579600},
+                    "3p-5h": {"remaining_fraction": 0.10, "reset_in_seconds": 10080},
+                    "3p-weekly": {"remaining_fraction": 0.05, "reset_in_seconds": 568800},
+                },
+                "transcript_path": str(log_path),
+            }
+            with mock.patch.object(hud, "HOME_DIR", tmp_path):
+                rendered = hud.render_hud(
+                    payload,
+                    cfg,
+                    now=hud.parse_iso_timestamp("2026-11-26T12:00:10Z"),
+                    allow_bg_refresh=False,
+                )
+
+            rose = "\x1b[38;2;190;24;93m"
+            teal = "\x1b[38;2;15;118;110m"
+            blue = "\x1b[38;2;24;86;255m"
+            ice_bg = "\x1b[48;2;235;243;255m"
+            ok_green = "\x1b[38;2;5;150;105m"
+            crimson = "\x1b[38;2;220;38;38m"
+            self.assertIn(f"\x1b[1m{rose}Gemini 4 Hydrogen ◔ medium", rendered)
+            self.assertNotIn("[Gemini 4 Hydrogen", rendered)
+            self.assertIn(f"\x1b[1m{teal}claudespace", rendered)
+            self.assertIn(f"{blue}━", rendered)
+            self.assertIn("─────────", rendered)
+            self.assertIn(ice_bg, rendered)
+            self.assertIn(f"{blue}▎", rendered)
+            self.assertNotIn(hud.SLATE_ROW_BG, rendered)
+            self.assertIn(f"{crimson}10%", rendered)
+            self.assertIn("◑", rendered)
+            self.assertIn(f"{ok_green}✓", rendered)
+
+            plain_lines = strip_ansi(rendered).splitlines()
+            self.assertEqual(plain_lines[2].index("5h:"), plain_lines[3].index("5h:"))
+            self.assertEqual(plain_lines[2].index("7d:"), plain_lines[3].index("7d:"))
+
+            # Default config must stay untouched with slate dark row
+            default_rendered = hud.render_hud(
+                payload,
+                hud.DEFAULT_CONFIG,
+                now=hud.parse_iso_timestamp("2026-11-26T12:00:10Z"),
+                allow_bg_refresh=False,
+            )
+            self.assertIn(hud.SLATE_ROW_BG, default_rendered)
+
 
 if __name__ == "__main__":
     unittest.main()

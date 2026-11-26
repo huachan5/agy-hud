@@ -162,11 +162,13 @@ I18N: dict[str, dict[str, str]] = {
 }
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "theme": "default",
     "language": "zh-Hans",
     "lineLayout": "expanded",
     "showSeparators": False,
     "pathLevels": 1,
     "maxWidth": None,
+    "style": {},
     "gitStatus": {
         "enabled": True,
         "showDirty": True,
@@ -228,6 +230,46 @@ DEFAULT_CONFIG: dict[str, Any] = {
     },
 }
 
+THEME_PRESETS: dict[str, dict[str, Any]] = {
+    "appleVibrancy": {
+        "style": {
+            "separator": "  ·  ",
+            "modelBrackets": False,
+            "modelBold": True,
+            "projectBold": True,
+            "barWidth": 10,
+            "minFilledWhenPositive": True,
+        },
+        "colors": {
+            "model": "#BE185D",
+            "project": "#0F766E",
+            "git": "#0F766E",
+            "gitBranch": "#BE185D",
+            "context": "#1856FF",
+            "contextValue": "#1E293B",
+            "usage": "#0F172A",
+            "usageWarning": "#B45309",
+            "warning": "#D97706",
+            "critical": "#DC2626",
+            "success": "#059669",
+            "label": "#64748B",
+            "separator": "#CBD5E1",
+            "barTrack": "#94A3B8",
+            "toolRunning": "#1E293B",
+            "toolDone": "#475569",
+            "activePool": "iceVibrancy",
+            "activePoolBg": "#EBF3FF",
+            "activePoolAccent": "#1856FF",
+            "activePoolLabel": "#475569",
+            "activePoolDim": "#64748B",
+            "inactivePool": "#94A3B8",
+            "custom": 208,
+            "barFilled": "━",
+            "barEmpty": "─",
+        },
+    },
+}
+
 
 # ── Config & i18n ──────────────────────────────────────────────────────────────
 
@@ -247,6 +289,15 @@ def _deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any
     return out
 
 
+def build_config(raw: dict[str, Any] | None = None) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        return _deep_merge(DEFAULT_CONFIG, {})
+    theme_name = str(raw.get("theme") or "default").strip()
+    preset = THEME_PRESETS.get(theme_name)
+    base = _deep_merge(DEFAULT_CONFIG, preset) if preset else DEFAULT_CONFIG
+    return _deep_merge(base, raw)
+
+
 def load_config() -> dict[str, Any]:
     candidates = []
     env_cfg = os.environ.get("AGY_HUD_CONFIG")
@@ -262,10 +313,10 @@ def load_config() -> dict[str, Any]:
                 with cfg_path.open("r", encoding="utf-8") as f:
                     raw = json.load(f)
                 if isinstance(raw, dict):
-                    return _deep_merge(DEFAULT_CONFIG, raw)
+                    return build_config(raw)
         except Exception:
             continue
-    return _deep_merge(DEFAULT_CONFIG, {})
+    return build_config({})
 
 
 def tr(config: dict[str, Any], key: str) -> str:
@@ -291,6 +342,41 @@ def resolve_ansi(value: Any, fallback: str) -> str:
             return f"\x1b[38;2;{r};{g};{b}m"
         return ANSI_BY_NAME.get(value, fallback)
     return fallback
+
+
+def resolve_bg_ansi(value: Any, fallback: str) -> str:
+    if isinstance(value, int) and 0 <= value <= 255:
+        return f"\x1b[48;5;{value}m"
+    if isinstance(value, str):
+        if re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            r = int(value[1:3], 16)
+            g = int(value[3:5], 16)
+            b = int(value[5:7], 16)
+            return f"\x1b[48;2;{r};{g};{b}m"
+        m_rgb = re.fullmatch(r"rgb\(\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*\)", value, re.IGNORECASE)
+        if m_rgb:
+            r, g, b = (min(255, int(m_rgb.group(i))) for i in (1, 2, 3))
+            return f"\x1b[48;2;{r};{g};{b}m"
+    return fallback
+
+
+def _format_separator(config: dict[str, Any], default_sep: str) -> str:
+    style = config.get("style") or {}
+    raw_sep = style.get("separator")
+    if not raw_sep:
+        return default_sep
+    sep_str = str(raw_sep)
+    colors = config.get("colors") or {}
+    sep_color = colors.get("separator")
+    if not sep_color:
+        return sep_str
+    core = sep_str.strip()
+    if not core:
+        return sep_str
+    idx = sep_str.find(core)
+    lead = sep_str[:idx]
+    trail = sep_str[idx + len(core) :]
+    return f"{lead}{colorize(core, resolve_ansi(sep_color, DIM))}{trail}"
 
 
 def colorize(text: str, ansi: str) -> str:
@@ -339,14 +425,25 @@ def quota_remaining_ansi(rem_pct: float, colors: dict[str, Any]) -> str:
     return quota_used_ansi(100.0 - rem_pct, colors)
 
 
-def render_bar(used_pct: float, width: int, display: dict[str, Any], colors: dict[str, Any]) -> str:
+def render_bar(
+    used_pct: float,
+    width: int,
+    display: dict[str, Any],
+    colors: dict[str, Any],
+    style: dict[str, Any] | None = None,
+) -> str:
     safe_pct = max(0.0, min(100.0, float(used_pct)))
-    filled = round((safe_pct / 100.0) * width)
-    empty = max(0, width - filled)
+    st = style or {}
+    bar_w = int(st.get("barWidth") or width)
+    filled = round((safe_pct / 100.0) * bar_w)
+    if st.get("minFilledWhenPositive") and safe_pct > 0 and filled == 0:
+        filled = 1
+    empty = max(0, bar_w - filled)
     filled_ch = str(colors.get("barFilled") or "█")
     empty_ch = str(colors.get("barEmpty") or "░")
     ansi = context_ansi(safe_pct, display, colors)
-    return f"{ansi}{filled_ch * filled}{DIM}{empty_ch * empty}{RESET}"
+    track_ansi = resolve_ansi(colors.get("barTrack"), DIM)
+    return f"{ansi}{filled_ch * filled}{track_ansi}{empty_ch * empty}{RESET}"
 
 
 def visual_width(text: str) -> int:
@@ -378,7 +475,7 @@ def wrap_line(line: str, max_width: int) -> list[str]:
     if max_width <= 0 or visual_width(line) <= max_width:
         return [line]
     # Split on top-level separators while preserving colors
-    tokens = re.split(r"( │ | \| )", line)
+    tokens = re.split(r"( │ | \| |  (?:\x1b\[[0-9;]*m)*·(?:\x1b\[[0-9;]*m)*  )", line)
     if len(tokens) <= 1:
         return [line]
     lines: list[str] = []
@@ -2072,6 +2169,7 @@ def render_project_line(
 ) -> str:
     display = config["display"]
     colors = config["colors"]
+    style = config.get("style") or {}
     parts: list[str] = []
 
     # 1. Model + Effort badge
@@ -2096,7 +2194,11 @@ def render_project_line(
                 badge_inner = f"{clean_model} {effort}"
             else:
                 badge_inner = f"{clean_model} {sym} {effort}"
-        parts.append(c_model(f"[{badge_inner}]", colors))
+        model_txt = f"[{badge_inner}]" if style.get("modelBrackets", True) else badge_inner
+        if style.get("modelBold", False):
+            parts.append(colorize(model_txt, f"\x1b[1m{resolve_ansi(colors.get('model'), CYAN)}"))
+        else:
+            parts.append(c_model(model_txt, colors))
 
     # 1.5 Optional agy-pool thread badge
     pool_cfg = config.get("pool") or {}
@@ -2117,7 +2219,11 @@ def render_project_line(
     # 2. Project directory + Git branch
     project_seg = ""
     if display.get("showProject", True) and data.get("cwd"):
-        project_seg = c_project(format_project_path(str(data["cwd"]), config.get("pathLevels", 1)), colors)
+        proj_path = format_project_path(str(data["cwd"]), config.get("pathLevels", 1))
+        if style.get("projectBold", False):
+            project_seg = colorize(proj_path, f"\x1b[1m{resolve_ansi(colors.get('project'), YELLOW)}")
+        else:
+            project_seg = c_project(proj_path, colors)
     git_seg = ""
     if git_status:
         branch_txt = git_status["branch"] + ("*" if git_status.get("dirty") else "")
@@ -2183,12 +2289,13 @@ def render_project_line(
         dur = format_duration_seconds(now - start_ts)
         parts.append(c_label(f"⏱ {dur}", colors))
 
-    return " │ ".join(parts)
+    return _format_separator(config, " │ ").join(parts)
 
 
 def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], config: dict[str, Any]) -> str:
     display = config["display"]
     colors = config["colors"]
+    style = config.get("style") or {}
     cw = data.get("context_window") or {}
 
     if cw.get("used_percentage") is not None:
@@ -2226,11 +2333,16 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
         val_text = f"{round(used_pct)}% ({format_tokens(used_tokens)}/{format_tokens(ctx_limit)})"
     else:
         val_text = f"{round(used_pct)}%"
-    val_display = f"{val_ansi}{val_text}{RESET}"
+    warn = float(display.get("contextWarningThreshold", 70))
+    if used_pct < warn and colors.get("contextValue"):
+        ctx_val_ansi = resolve_ansi(colors.get("contextValue"), val_ansi)
+        val_display = f"\x1b[1m{ctx_val_ansi}{val_text}{RESET}"
+    else:
+        val_display = f"{val_ansi}{val_text}{RESET}"
 
     lbl = c_label(tr(config, "label.context"), colors)
     if display.get("showContextBar", True):
-        bar = render_bar(used_pct, 8, display, colors)
+        bar = render_bar(used_pct, 8, display, colors, style=style)
         seg = f"{lbl} {bar} {val_display}"
     else:
         seg = f"{lbl} {val_display}"
@@ -2258,7 +2370,16 @@ def _format_pool_parts(
     colors: dict[str, Any],
 ) -> tuple[str, list[str]]:
     is_remaining = mode != "used"
-    if is_active:
+    is_ice_vibrancy = colors.get("activePool") == "iceVibrancy"
+
+    if is_ice_vibrancy:
+        if is_active:
+            accent_ansi = resolve_ansi(colors.get("activePoolAccent"), "\x1b[38;2;24;86;255m")
+            lbl = f"{accent_ansi}▎{RESET} \x1b[1m{accent_ansi}{pool_label}{RESET}"
+        else:
+            inact_ansi = resolve_ansi(colors.get("inactivePool"), "\x1b[38;2;148;163;184m")
+            lbl = f"  {colorize(pool_label, inact_ansi)}"
+    elif is_active:
         active_val = colors.get("activePool", "slateBadge")
         if active_val == "slateBadge" or not active_val:
             lbl = f"\x1b[1;97m[{pool_label}]{RESET}"
@@ -2284,12 +2405,26 @@ def _format_pool_parts(
             ansi = quota_used_ansi(pct_val, colors)
         bar_str = f"{render_quota_mini_bar(pct_val, is_remaining, colors)} " if show_bars else ""
         rst = str(info.get("refreshes_in") or "")
-        bucket_lbl = f"\x1b[97m{bucket_name}:{RESET}" if is_active else c_label(f"{bucket_name}:", colors)
-        pct_ansi = ansi if (is_active or rem <= 20.0) else f"{DIM}{ansi}"
-        s = f"{bucket_lbl} {bar_str}{pct_ansi}{pct_val}%{RESET}"
-        if rst:
-            rst_str = f"{SLATE_ROW_DIM}({rst}){RESET}" if is_active else c_label(f"({rst})", colors)
-            s += f" {rst_str}"
+        if is_ice_vibrancy:
+            if is_active:
+                bucket_lbl = colorize(f"{bucket_name}:", resolve_ansi(colors.get("activePoolLabel"), "\x1b[38;2;71;85;105m"))
+                s = f"{bucket_lbl} {bar_str}\x1b[1m{ansi}{pct_val}%{RESET}"
+                if rst:
+                    s += f" {colorize(f'({rst})', resolve_ansi(colors.get('activePoolDim'), '\x1b[38;2;100;116;139m'))}"
+            else:
+                inact_ansi = resolve_ansi(colors.get("inactivePool"), "\x1b[38;2;148;163;184m")
+                bucket_lbl = colorize(f"{bucket_name}:", inact_ansi)
+                pct_str = f"\x1b[1m{ansi}{pct_val}%{RESET}" if rem <= 20.0 else f"{inact_ansi}{pct_val}%{RESET}"
+                s = f"{bucket_lbl} {bar_str}{pct_str}"
+                if rst:
+                    s += f" {colorize(f'({rst})', inact_ansi)}"
+        else:
+            bucket_lbl = f"\x1b[97m{bucket_name}:{RESET}" if is_active else c_label(f"{bucket_name}:", colors)
+            pct_ansi = ansi if (is_active or rem <= 20.0) else f"{DIM}{ansi}"
+            s = f"{bucket_lbl} {bar_str}{pct_ansi}{pct_val}%{RESET}"
+            if rst:
+                rst_str = f"{SLATE_ROW_DIM}({rst}){RESET}" if is_active else c_label(f"({rst})", colors)
+                s += f" {rst_str}"
         buckets.append(s)
     return (lbl, buckets) if buckets else ("", [])
 
@@ -2316,7 +2451,10 @@ def _format_pool_string(
     return f"{lbl} {' / '.join(buckets)}"
 
 
-def _align_pool_rows(rows: list[tuple[str, list[str], bool]]) -> list[str]:
+def _align_pool_rows(
+    rows: list[tuple[str, list[str], bool]],
+    colors: dict[str, Any] | None = None,
+) -> list[str]:
     if not rows:
         return []
     max_tag_w = max(visual_width(lbl) for lbl, _, _ in rows)
@@ -2325,6 +2463,9 @@ def _align_pool_rows(rows: list[tuple[str, list[str], bool]]) -> list[str]:
     for _, buckets, _ in rows:
         for idx, b_str in enumerate(buckets):
             col_widths[idx] = max(col_widths[idx], visual_width(b_str))
+
+    is_ice_vibrancy = isinstance(colors, dict) and colors.get("activePool") == "iceVibrancy"
+    row_bg = resolve_bg_ansi(colors.get("activePoolBg"), "\x1b[48;2;235;243;255m") if is_ice_vibrancy else SLATE_ROW_BG
 
     lines: list[str] = []
     for lbl, buckets, is_active in rows:
@@ -2339,10 +2480,13 @@ def _align_pool_rows(rows: list[tuple[str, list[str], bool]]) -> list[str]:
         content = "".join(row_parts)
         if is_active:
             # Keep background continuous across inner RESETs
-            painted = content.replace(RESET, f"{RESET}{SLATE_ROW_BG}")
-            lines.append(f"{SLATE_ROW_BG} {painted} {RESET}")
+            painted = content.replace(RESET, f"{RESET}{row_bg}")
+            if is_ice_vibrancy:
+                lines.append(f"{row_bg}{painted} {RESET}")
+            else:
+                lines.append(f"{row_bg} {painted} {RESET}")
         else:
-            lines.append(f" {content}")
+            lines.append(content if is_ice_vibrancy else f" {content}")
     return lines
 
 
@@ -2521,7 +2665,7 @@ def render_usage_blocks(
     if alert:
         inline_segments.append(alert)
 
-    return " │ ".join(inline_segments), _align_pool_rows(pool_rows)
+    return _format_separator(config, " │ ").join(inline_segments), _align_pool_rows(pool_rows, colors=colors)
 
 
 def render_usage_segment(
@@ -2541,7 +2685,7 @@ def render_usage_segment(
         now=now,
     )
     parts = [p for p in (inline_seg, *pool_lines) if p]
-    return " │ ".join(parts)
+    return _format_separator(config, " │ ").join(parts)
 
 
 def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> str:
@@ -2560,7 +2704,7 @@ def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> s
         parts.append(c_label(f"{counts['skillsCount']} {tr(config, 'label.skills')}", colors))
     if counts.get("hooksCount", 0) > 0:
         parts.append(c_label(f"{counts['hooksCount']} {tr(config, 'label.hooks')}", colors))
-    return " | ".join(parts)
+    return _format_separator(config, " | ").join(parts)
 
 
 def _format_tool_name(name: str, display: dict[str, Any]) -> str:
@@ -2591,13 +2735,20 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
 
     warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
     usage_ansi = resolve_ansi(colors.get("usage"), CYAN)
-    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+    ok_ansi = resolve_ansi(colors.get("success") or colors.get("context"), GREEN)
+    tool_run_cfg = colors.get("toolRunning")
+    tool_done_cfg = colors.get("toolDone")
 
     for tool in running[-2:]:
         tname = _format_tool_name(str(tool["name"]), display)
         target = str(tool.get("target") or "")
-        target_str = c_label(f": {target}", colors) if target else ""
-        parts.append(f"{colorize('◐', warn_ansi)} {colorize(tname, usage_ansi)}{target_str}")
+        if tool_run_cfg:
+            run_ansi = resolve_ansi(tool_run_cfg, usage_ansi)
+            full_txt = f"{tname}: {target}" if target else tname
+            parts.append(f"{colorize('◑', warn_ansi)} {colorize(full_txt, run_ansi)}")
+        else:
+            target_str = c_label(f": {target}", colors) if target else ""
+            parts.append(f"{colorize('◐', warn_ansi)} {colorize(tname, usage_ansi)}{target_str}")
 
     counts: dict[str, int] = {}
     for tool in completed:
@@ -2608,13 +2759,17 @@ def render_tools_line(transcript: dict[str, Any], config: dict[str, Any]) -> str
     max_vis = int(display.get("toolsMaxVisible", 4))
     visible = sorted_tools if max_vis == 0 else sorted_tools[:max_vis]
     for tname, cnt in visible:
-        parts.append(f"{colorize('✓', ctx_ansi)} {tname} {c_label(f'×{cnt}', colors)}")
+        if tool_done_cfg:
+            done_ansi = resolve_ansi(tool_done_cfg, DIM)
+            parts.append(f"{colorize('✓', ok_ansi)} {colorize(f'{tname} ×{cnt}', done_ansi)}")
+        else:
+            parts.append(f"{colorize('✓', ok_ansi)} {tname} {c_label(f'×{cnt}', colors)}")
 
     hidden = 0 if max_vis == 0 else max(0, len(sorted_tools) - len(visible))
     if hidden > 0:
         parts.append(c_label(f"+{hidden} more", colors))
 
-    return " | ".join(parts)
+    return _format_separator(config, " | ").join(parts)
 
 
 def _load_subagent_state() -> dict[str, Any]:
@@ -2852,7 +3007,7 @@ def render_todos_line(todos: list[dict[str, str]], config: dict[str, Any]) -> st
     in_progress = next((td for td in todos if td.get("status") == "in_progress"), None)
 
     warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
-    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+    ctx_ansi = resolve_ansi(colors.get("success") or colors.get("context"), GREEN)
 
     if in_progress is not None:
         content = _sanitize_text(in_progress.get("content", ""), 50)
@@ -2902,7 +3057,7 @@ def render_agents_line(agents: list[dict[str, Any]], config: dict[str, Any], now
 
     warn_ansi = resolve_ansi(colors.get("warning"), YELLOW)
     crit_ansi = resolve_ansi(colors.get("critical"), RED)
-    ctx_ansi = resolve_ansi(colors.get("context"), GREEN)
+    ctx_ansi = resolve_ansi(colors.get("success") or colors.get("context"), GREEN)
     role_ansi = resolve_ansi(colors.get("usageWarning"), MAGENTA)
 
     lines: list[str] = []
@@ -2979,10 +3134,11 @@ def render_hud(
         pool_ctx=pool_ctx,
         now=now_ts,
     )
-    ctx_line = f"{ctx_seg} │ {usage_inline}" if (ctx_seg and usage_inline) else (ctx_seg or usage_inline)
+    sep_top = _format_separator(cfg, " │ ")
+    ctx_line = f"{ctx_seg}{sep_top}{usage_inline}" if (ctx_seg and usage_inline) else (ctx_seg or usage_inline)
     if cfg.get("lineLayout") == "compact":
         line2_parts = [p for p in (ctx_line, *pool_lines) if p]
-        line2 = " │ ".join(line2_parts)
+        line2 = sep_top.join(line2_parts)
     else:
         line2 = "\n".join(p for p in (ctx_line, *pool_lines) if p)
     line3 = render_environment_line(counts, cfg)
@@ -2994,7 +3150,7 @@ def render_hud(
     if cfg.get("lineLayout") == "compact":
         compact_parts = [p for p in (line1, line2, line3) if p]
         if compact_parts:
-            raw_lines.append(" │ ".join(compact_parts))
+            raw_lines.append(sep_top.join(compact_parts))
     else:
         for ln in (line1, line2, line3):
             if ln:

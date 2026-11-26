@@ -130,11 +130,13 @@ if os.path.isfile(target_cfg):
         pool_cfg.setdefault("syncLiveTelemetry", True)
         pool_cfg.setdefault("liveSyncIntervalSeconds", 5)
     # Preserve user-customized colors dict while ensuring colors key exists if absent
-    if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
-        user_cfg["colors"] = dict(default_cfg["colors"])
-    elif isinstance(user_cfg.get("colors"), dict):
-        if user_cfg["colors"].get("activePool") in (None, "", "stampRed"):
-            user_cfg["colors"]["activePool"] = "slateBadge"
+    theme_name = str(user_cfg.get("theme") or "default").strip()
+    if theme_name in ("", "default"):
+        if "colors" not in user_cfg and isinstance(default_cfg.get("colors"), dict):
+            user_cfg["colors"] = dict(default_cfg["colors"])
+        elif isinstance(user_cfg.get("colors"), dict):
+            if user_cfg["colors"].get("activePool") in (None, "", "stampRed"):
+                user_cfg["colors"]["activePool"] = "slateBadge"
     final_cfg = user_cfg
 else:
     final_cfg = default_cfg
