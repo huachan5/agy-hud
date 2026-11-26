@@ -94,21 +94,22 @@ class TestAgyHud(unittest.TestCase):
                 rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=now, allow_bg_refresh=False)
             plain = strip_ansi(rendered)
             rows = plain.splitlines()
-            self.assertEqual(len(rows), 4, f"Expected 4 rows, got:\n{plain}")
+            self.assertEqual(len(rows), 6, f"Expected 6 rows, got:\n{plain}")
             self.assertIn("[Gemini 4 Neon ◑ high]", rows[0])
             self.assertIn("cspace git:(feat/hud*)", rows[0])
             self.assertIn("上下文", rows[1])
             self.assertIn("7%", rows[1])
-            self.assertIn("Gemini 5h: 92% (4h 12m) | 7d: 88% (5d 3h)", rows[1])
-            self.assertIn("3P 5h: 75% (2h 40m) | 7d: 81% (6d 1h)", rows[1])
-            # Active Gemini pool comes before 3P pool
-            self.assertLess(rows[1].index("Gemini"), rows[1].index("3P"))
+            self.assertEqual(rows[2], "[Gemini]  5h: 92% (4h 12m)  7d: 88% (5d 3h)")
+            self.assertEqual(rows[3], "[3P]      5h: 75% (2h 40m)  7d: 81% (6d 1h)")
+            # Active pool tag is bold cyan, inactive pool tag is dim
+            self.assertIn(f"\x1b[1m{hud.CYAN}[Gemini]{hud.RESET}", rendered)
+            self.assertIn(f"{hud.DIM}[3P]{hud.RESET}", rendered)
             self.assertNotIn("Codex", plain)
-            self.assertIn("1 AGENTS.md", rows[2])
-            self.assertIn("1 MCPs", rows[2])
-            self.assertIn("1 Skills", rows[2])
-            self.assertIn("✓ Read ×2", rows[3])
-            self.assertIn("+1 more", rows[3])
+            self.assertIn("1 AGENTS.md", rows[4])
+            self.assertIn("1 MCPs", rows[4])
+            self.assertIn("1 Skills", rows[4])
+            self.assertIn("✓ Read ×2", rows[5])
+            self.assertIn("+1 more", rows[5])
 
     def test_3p_model_orders_3p_first_and_active_only_mode(self):
         payload = {
@@ -116,13 +117,16 @@ class TestAgyHud(unittest.TestCase):
             "context_window": {"used_percentage": 25.0},
             "quota": SAMPLE_QUOTA,
         }
-        both_plain = strip_ansi(hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
-        self.assertLess(both_plain.index("3P"), both_plain.index("Gemini"))
+        both_rendered = hud.render_hud(payload, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False)
+        both_plain = strip_ansi(both_rendered)
+        self.assertLess(both_plain.index("[3P]"), both_plain.index("[Gemini]"))
+        self.assertIn(f"\x1b[1m{hud.CYAN}[3P]{hud.RESET}", both_rendered)
+        self.assertIn(f"{hud.DIM}[Gemini]{hud.RESET}", both_rendered)
 
         cfg_active = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"quotaPools": "active"}})
         active_plain = strip_ansi(hud.render_hud(payload, cfg_active, now=1000.0, allow_bg_refresh=False))
-        self.assertIn("3P 5h: 75%", active_plain)
-        self.assertNotIn("Gemini 5h", active_plain)
+        self.assertIn("[3P]  5h: 75%", active_plain)
+        self.assertNotIn("[Gemini]", active_plain)
 
     def test_usage_value_used_mode(self):
         payload = {
@@ -134,7 +138,7 @@ class TestAgyHud(unittest.TestCase):
         }
         cfg_used = hud._deep_merge(hud.DEFAULT_CONFIG, {"display": {"usageValue": "used"}})
         plain = strip_ansi(hud.render_hud(payload, cfg_used, now=1000.0, allow_bg_refresh=False))
-        self.assertIn("Gemini 5h: 30% (1h)", plain)
+        self.assertIn("[Gemini]  5h: 30% (1h)", plain)
 
     def test_oneshot_cli_execution(self):
         payload = json.dumps({
@@ -158,8 +162,8 @@ class TestAgyHud(unittest.TestCase):
         self.assertIn(HUD_DIR.parent.name, plain)
         self.assertIn("上下文", plain)
         self.assertIn("18%", plain)
-        self.assertIn("Gemini 5h: 92%", plain)
-        self.assertIn("3P 5h: 75%", plain)
+        self.assertIn("[Gemini]  5h: 92%", plain)
+        self.assertIn("[3P]      5h: 75%", plain)
         self.assertIn("AGENTS.md", plain)
         self.assertIn("MCPs", plain)
 
@@ -743,11 +747,10 @@ class TestAgyHud(unittest.TestCase):
             "quota": quota,
         }
         plain_argon = strip_ansi(hud.render_hud(payload_argon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
-        line2_argon = plain_argon.splitlines()[1]
-        self.assertIn("Argon 7d: 84% (5d 2h)", line2_argon)
-        self.assertIn("Gemini 5h: 92%", line2_argon)
-        self.assertNotIn("3P", line2_argon)
-        self.assertLess(line2_argon.index("Argon"), line2_argon.index("Gemini"))
+        rows_argon = plain_argon.splitlines()
+        self.assertIn("[Argon]   7d: 84% (5d 2h)", rows_argon[2])
+        self.assertIn("[Gemini]  5h: 92%", rows_argon[3])
+        self.assertNotIn("[3P]", plain_argon)
 
         payload_neon = {
             "model": {"display_name": "Gemini 4 Neon (High)", "id": "gemini-4-neon-high"},
@@ -755,9 +758,10 @@ class TestAgyHud(unittest.TestCase):
             "quota": {**SAMPLE_QUOTA, "gemini-argon-wtu-weekly": {"remaining_fraction": 0.84, "reset_in_seconds": 439200}},
         }
         plain_neon = strip_ansi(hud.render_hud(payload_neon, hud.DEFAULT_CONFIG, now=1000.0, allow_bg_refresh=False))
-        line2_neon = plain_neon.splitlines()[1]
-        self.assertLess(line2_neon.index("Gemini"), line2_neon.index("Argon"))
-        self.assertLess(line2_neon.index("Argon"), line2_neon.index("3P"))
+        rows_neon = plain_neon.splitlines()
+        self.assertTrue(rows_neon[2].startswith("[Gemini]"))
+        self.assertTrue(rows_neon[3].startswith("[Argon]"))
+        self.assertTrue(rows_neon[4].startswith("[3P]"))
 
     def test_pool_unmanaged_and_corrupt_db_zero_regression(self):
         import os

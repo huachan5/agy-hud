@@ -2237,7 +2237,7 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     return seg
 
 
-def _format_pool_string(
+def _format_pool_parts(
     pool_label: str,
     pool_data: dict[str, dict[str, Any]],
     *,
@@ -2245,9 +2245,15 @@ def _format_pool_string(
     mode: str,
     show_bars: bool,
     colors: dict[str, Any],
-) -> str:
+) -> tuple[str, list[str]]:
     is_remaining = mode != "used"
-    lbl = colorize(pool_label, resolve_ansi(colors.get("model"), CYAN)) if is_active else c_label(pool_label, colors)
+    tag_text = f"[{pool_label}]"
+    if is_active:
+        active_ansi = resolve_ansi(colors.get("model"), CYAN)
+        lbl = f"\x1b[1m{active_ansi}{tag_text}{RESET}"
+    else:
+        lbl = c_label(tag_text, colors)
+
     buckets: list[str] = []
     ordered_buckets = [b for b in ("5h", "1d", "7d") if b in pool_data]
     ordered_buckets.extend(sorted(b for b in pool_data if b not in ("5h", "1d", "7d")))
@@ -2264,11 +2270,59 @@ def _format_pool_string(
             ansi = quota_used_ansi(pct_val, colors)
         bar_str = f"{render_quota_mini_bar(pct_val, is_remaining, colors)} " if show_bars else ""
         rst = str(info.get("refreshes_in") or "")
-        s = f"{c_label(f'{bucket_name}:', colors)} {bar_str}{ansi}{pct_val}%{RESET}"
+        bucket_lbl = f"{bucket_name}:" if is_active else c_label(f"{bucket_name}:", colors)
+        pct_ansi = ansi if (is_active or rem <= 20.0) else f"{DIM}{ansi}"
+        s = f"{bucket_lbl} {bar_str}{pct_ansi}{pct_val}%{RESET}"
         if rst:
             s += f" {c_label(f'({rst})', colors)}"
         buckets.append(s)
-    return f"{lbl} {' | '.join(buckets)}" if buckets else ""
+    return (lbl, buckets) if buckets else ("", [])
+
+
+def _format_pool_string(
+    pool_label: str,
+    pool_data: dict[str, dict[str, Any]],
+    *,
+    is_active: bool,
+    mode: str,
+    show_bars: bool,
+    colors: dict[str, Any],
+) -> str:
+    lbl, buckets = _format_pool_parts(
+        pool_label,
+        pool_data,
+        is_active=is_active,
+        mode=mode,
+        show_bars=show_bars,
+        colors=colors,
+    )
+    if not buckets:
+        return ""
+    return f"{lbl} {' / '.join(buckets)}"
+
+
+def _align_pool_rows(rows: list[tuple[str, list[str]]]) -> list[str]:
+    if not rows:
+        return []
+    max_tag_w = max(visual_width(lbl) for lbl, _ in rows)
+    max_cols = max(len(buckets) for _, buckets in rows)
+    col_widths = [0] * max_cols
+    for _, buckets in rows:
+        for idx, b_str in enumerate(buckets):
+            col_widths[idx] = max(col_widths[idx], visual_width(b_str))
+
+    lines: list[str] = []
+    for lbl, buckets in rows:
+        tag_pad = max_tag_w - visual_width(lbl) + 2
+        row_parts = [f"{lbl}{' ' * tag_pad}"]
+        for idx, b_str in enumerate(buckets):
+            if idx < len(buckets) - 1:
+                b_pad = col_widths[idx] - visual_width(b_str) + 2
+                row_parts.append(f"{b_str}{' ' * b_pad}")
+            else:
+                row_parts.append(b_str)
+        lines.append("".join(row_parts))
+    return lines
 
 
 def _pick_alternative_account(accounts: list[dict[str, Any]], current_id: str, now_ts: float) -> dict[str, Any] | None:
@@ -2356,18 +2410,18 @@ def _render_pool_alert(
     return colorize(msg, warn_ansi)
 
 
-def render_usage_segment(
+def render_usage_blocks(
     data: dict[str, Any],
     stdin_pools: dict[str, dict[str, dict[str, Any]]],
     agy_quota_fallback: dict[str, Any],
     config: dict[str, Any],
     pool_ctx: dict[str, Any] | None = None,
     now: float | None = None,
-) -> str:
+) -> tuple[str, list[str]]:
     display = config["display"]
     colors = config["colors"]
     if not display.get("showUsage", True):
-        return ""
+        return "", []
 
     mode = str(display.get("usageValue", "remaining"))
     show_bars = bool(display.get("showQuotaBars", False))
@@ -2384,7 +2438,8 @@ def render_usage_segment(
 
     active_key = _detect_active_quota_pool(model_id, raw_name, stdin_pools)
 
-    segments: list[str] = []
+    inline_segments: list[str] = []
+    pool_rows: list[tuple[str, list[str]]] = []
 
     if stdin_pools:
         if pool_mode == "active":
@@ -2402,7 +2457,7 @@ def render_usage_segment(
 
         for k in chosen:
             label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
-            formatted = _format_pool_string(
+            lbl, buckets = _format_pool_parts(
                 label_text,
                 stdin_pools[k],
                 is_active=(k == active_key),
@@ -2410,8 +2465,8 @@ def render_usage_segment(
                 show_bars=show_bars,
                 colors=colors,
             )
-            if formatted:
-                segments.append(formatted)
+            if buckets:
+                pool_rows.append((lbl, buckets))
     elif "remaining_percentage" in agy_quota_fallback:
         rem = float(agy_quota_fallback["remaining_percentage"])
         if mode == "used":
@@ -2426,25 +2481,45 @@ def render_usage_segment(
         q_txt = f"{c_label(tag, colors)} {ansi}{pct_val}%{RESET}"
         if reset_in:
             q_txt += f" {c_label(f'({reset_in})', colors)}"
-        segments.append(q_txt)
+        inline_segments.append(q_txt)
 
-    if not segments and display.get("showPlanTier", True) and data.get("plan_tier"):
+    if not pool_rows and not inline_segments and display.get("showPlanTier", True) and data.get("plan_tier"):
         plan_short = shorten_plan_tier(str(data["plan_tier"]))
         if plan_short:
-            segments.append(c_label(plan_short, colors))
+            inline_segments.append(c_label(plan_short, colors))
 
     if display.get("showSessionTokens", False):
         cw = data.get("context_window") or {}
         in_t = int(cw.get("total_input_tokens") or 0)
         out_t = int(cw.get("total_output_tokens") or 0)
         if in_t or out_t:
-            segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
+            inline_segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
 
     alert = _render_pool_alert(data, stdin_pools, agy_quota_fallback, pool_ctx, active_key, config, now_ts)
     if alert:
-        segments.append(alert)
+        inline_segments.append(alert)
 
-    return " │ ".join(segments)
+    return " │ ".join(inline_segments), _align_pool_rows(pool_rows)
+
+
+def render_usage_segment(
+    data: dict[str, Any],
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+    agy_quota_fallback: dict[str, Any],
+    config: dict[str, Any],
+    pool_ctx: dict[str, Any] | None = None,
+    now: float | None = None,
+) -> str:
+    inline_seg, pool_lines = render_usage_blocks(
+        data,
+        stdin_pools,
+        agy_quota_fallback,
+        config,
+        pool_ctx=pool_ctx,
+        now=now,
+    )
+    parts = [p for p in (inline_seg, *pool_lines) if p]
+    return " │ ".join(parts)
 
 
 def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> str:
@@ -2874,7 +2949,7 @@ def render_hud(
 
     line1 = render_project_line(data, transcript, git_status, cfg, now_ts, pool_ctx=pool_ctx)
     ctx_seg = render_context_segment(data, transcript, cfg)
-    usage_seg = render_usage_segment(
+    usage_inline, pool_lines = render_usage_blocks(
         data,
         stdin_pools,
         agy_quota_fallback,
@@ -2882,7 +2957,12 @@ def render_hud(
         pool_ctx=pool_ctx,
         now=now_ts,
     )
-    line2 = f"{ctx_seg} │ {usage_seg}" if (ctx_seg and usage_seg) else (ctx_seg or usage_seg)
+    ctx_line = f"{ctx_seg} │ {usage_inline}" if (ctx_seg and usage_inline) else (ctx_seg or usage_inline)
+    if cfg.get("lineLayout") == "compact":
+        line2_parts = [p for p in (ctx_line, *pool_lines) if p]
+        line2 = " │ ".join(line2_parts)
+    else:
+        line2 = "\n".join(p for p in (ctx_line, *pool_lines) if p)
     line3 = render_environment_line(counts, cfg)
     line4 = render_tools_line(transcript, cfg)
     line5 = render_agents_line(agents, cfg, now_ts)
