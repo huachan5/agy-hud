@@ -1,5 +1,7 @@
 # agy-hud · R4「冰白微胶囊（`frostedPills`）」UI 设计语言规范
 
+![agy-hud frostedPills（R4）全六态完整视觉规范](./ui-spec-r4.png)
+
 > **设计版本**：R4（`frostedPills`）  
 > **适用宿主**：macOS Otty 浅色半透明毛玻璃终端（`#F7F9FA` 宣纸磨砂底 + 1px 输入分隔线）  
 > **落地实现**：[hud.py](../hud.py)（`THEME_PRESETS["frostedPills"]` / `_R4_FROSTED_PILLS_STYLE`）  

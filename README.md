@@ -2,42 +2,48 @@
 
 参考 Claude Code 的 `claude-hud` 设计，为 Antigravity CLI (`agy`) 打造的中文实时状态栏插件（纯 Python 标准库，零外部依赖，已避开 Windows `cmd /c` 路径引号转义坑）。
 
-## 显示内容
+## 显示内容（R4 `frostedPills` 默认形态）
 
 ```text
-[Gemini 4 Neon ◑ high] │ cspace git:(main* !2 +1 ?1) │ 需求分析与升级 │ ⏱ 12m
-上下文 ██░░░░░░ 18% │ Gemini 5h: 92% (4h 12m) | 7d: 88% (5d 3h) │ 3P 5h: 75% (2h 40m) | 7d: 81% (6d 1h)
-1 AGENTS.md | 1 MCPs | 21 Skills
-✓ Read ×8 | ✓ Shell ×4 | ✓ Edit ×2 | ✓ Write ×1 | +1 more
-◐ Codebase Researcher [gemini-4-hydrogen]: Search auth middleware (12s)
+● Gemini 4 Neon · high  claudespace  ⎇ main* !2 +1  CTX ▰▰▱▱▱▱▱ 28% (56k/200k)  41m
+▸ Gemini  5h ━━━━┄┄ 69% (55m) │ 7d ━━━┄┄┄ 51% (5d 19h)  ○ 3P  5h 100% · 7d 5%!
+✓ Shell ×43  Read ×36  Edit ×15  Write ×10  +2
+◐ Codebase Researcher [hydrogen]: Search auth middleware (12s)
 ▸ 实现子 Agent 实时追踪 (2/5)
+● Idle                                       1 AGENTS · 3 MCPs · 24 Skills · 1 钩子
 ```
 
-- **第 1 行**：模型名 + 思考强度图标（`○ low / ◔ medium / ◑ high / ◕ xhigh / ● max`）、托管线程徽章（`agy-pool` 联动时显示 `[T1·main·#1]`）、当前项目与 Git 分支（默认开启 `gitStatus.showFileStats` 显示 `!M +A ✘D ?U`）、会话标题（`conversation_title`）、会话时长。
-- **第 2 行**：中文上下文进度条（绿/黄/红阈值，支持 `contextValue` 切换 `percent` / `remaining` / `tokens` / `both`）+ **AGY 原生多模型配额池**：
-  - 直接读取 `agy` 传入的 `stdin.quota`，采用 **Gemini 池**（`gemini-5h` / `gemini-weekly`，涵盖 Neon / Hydrogen / Argon 系列，历史 `argon` 键自动归并至 Gemini 池）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列）双池布局，自动将当前模型所属配额池排在首位高亮，并自动隐藏 `"disabled": true` 的配额池。
+- **第 1 行**：淡冰蓝圆角微胶囊 `● 模型 · 思考档位`（`●` 随实时状态变色）、托管线程徽章（`agy-pool` 联动时显示 `[T1·main·#1]`）、当前项目目录、简洁 Git 分支 `⎇ branch`（默认开启 `gitStatus.showFileStats` 显示 `!M +A ✘D ?U`）、会话标题（`conversation_title`）、`CTX ▰▱` 上下文进度条（`frostedPills` 默认开启 `contextValue: "both"`，同时显示百分比与柔灰 `(56k/200k)` Token 明细）以及会话时长。
+- **第 2 行**：**AGY 原生双配额池同行微胶囊**：
+  - 固定采用 **Gemini 池**（`gemini-5h` / `gemini-weekly`，涵盖全系 Gemini 模型，历史 `argon` 键自动归并至 Gemini 池）与 **第三方 3P 池**（`3p-5h` / `3p-weekly`，如 Claude/GPT 系列）双池架构；不再展示冗余的 `AI Pro` 套餐行。
+  - 当前激活池独占清透浅青胶囊 `▸ Pool ...`（若任一窗口剩余 `≤5%` 自动切为柔和浅绯红微底纹 `#FCEEEF` 并提示 `↻ 建议换号`）；备用池保持无底纹柔灰 `○ Pool ...` 退后（仅 `≤5%!` 红标穿透）；窄终端下自动拆分为两行不断裂胶囊。
   - 可在 `config.json` 中切换 `quotaPools`（`"both"` 全池同显 / `"active"` 仅显示当前模型所在池）和 `usageValue`（`"remaining"` 显示剩余% / `"used"` 显示已用%）。
   - 在 `agy-pool` 托管会话下，支持红色账号不符告警（`⚠ 账号不符`）、低额度三态切换提醒（默认 `8%`，可在 `pool.lowQuotaThresholdPercent` 调整）以及 5 秒防抖回写 `pool.db`。
-- **第 3 行**：AGY 实际加载的 `AGENTS.md` / `GEMINI.md`、规则、MCP 服务、Skills 与钩子计数。
-- **第 4 行**：实时解析当前会话 `transcript.jsonl` 的工具调用统计（运行中 `◐` + 已完成 `✓ 工具 ×次数` + `+N more`）。
-- **第 5 行（按需）**：子 Agent 实时追踪（融合 AGY 原生 `stdin.subagents` + 父子 `transcript.jsonl` + `/swarm` worker，展示角色、实际模型、任务摘要、真实耗时与完成态保留，默认保留 `agentCompletedRetentionSeconds: 60` 秒）。
-- **第 6 行（按需）**：Todo 任务进度（优先解析当前会话 `brain/<conv_id>/task.md` 复选框进度，支持 `[x]` / `[/]` / `[ ]`）。
+- **动态活动区（第 3+ 行，按需上移）**：实时解析当前会话 `transcript.jsonl` 的工具调用统计（运行中 `◑` │ 已完成 `✓ 工具 ×次数` + `+N`）、子 Agent 实时追踪（融合 `stdin.subagents` + 父子 `transcript.jsonl` + `/swarm` worker，默认完成态保留 `agentCompletedRetentionSeconds: 60` 秒）与 Todo 任务进度（优先解析 `brain/<conv_id>/task.md`）。
+- **最底行（静态底座 & 实时状态）**：左对齐实时状态灯（`● Idle` / `◐ working` / `⏳ waiting` / `⚠ error`），右侧自动贴齐上方内容边缘展示 `AGENTS / MCPs / Skills / 钩子`（加粗数字配柔灰单位）；传统 `default` 等旧主题仍保持完全兼容。
 
 ## 主题预设与 macOS Otty 浅色玻璃 UI
 
-R4 默认设计语言规范与后续迭代指南见 [docs/ui-spec-r4-frosted-pills.md](./docs/ui-spec-r4-frosted-pills.md)（仓库协作者与 Agent 约束见 [AGENTS.md](./AGENTS.md)）。
+> 分支说明：`feat/mac-otty-r2-ui` 为 **macOS Otty 浅色毛玻璃专用分支**（不合入 `main`）；R4 默认设计语言规范与后续迭代指南见 [docs/ui-spec-r4-frosted-pills.md](./docs/ui-spec-r4-frosted-pills.md)（仓库协作者与 Agent 约束见 [AGENTS.md](./AGENTS.md)）。
+
+![agy-hud frostedPills（R4）全六态完整视觉规范](./docs/ui-spec-r4.png)
+
+<details>
+<summary>查看历史 R3（quartzTeal）与 R2 视觉规范图</summary>
+
+- [docs/ui-spec-r2.md](./docs/ui-spec-r2.md)
 
 ![agy-hud quartzTeal（R3）全六态设计图](./docs/ui-spec-r3.png)
 
-[查看 R2 与 R3 的视觉对比](./docs/ui-spec-r3-comparison.png)。
+![agy-hud R2 与 R3 的视觉对比](./docs/ui-spec-r3-comparison.png)
 
 ![agy-hud R2 完整交互与全状态 UI 设计图](./docs/ui-spec-r2.png)
 
-R2 全状态规范请查看 [docs/ui-spec-r2.md](./docs/ui-spec-r2.md)。
+</details>
 
 | 主题名 (`theme`) | 定位与适用场景 | 核心视觉特点 |
 | :--- | :--- | :--- |
-| `frostedPills` | **推荐 · macOS Otty R4「冰白微胶囊」** | 淡冰蓝模型胶囊 `#EBF3FA`、激活池浅青圆角微胶囊 `#E8F5F3`（`≤5%` 切浅绯红 `#FCEEEF` + `↻ 建议换号`）、双池同行（窄屏自动折行）、`CTX` `▰▱` 进度条、`Idle` + 加粗数字底栏，支持 `"pillRounded": false` 纯矩形回退 |
+| `frostedPills` | **推荐 · macOS Otty R4「冰白微胶囊」** | 淡冰蓝模型胶囊 `#EBF3FA`、激活池浅青圆角微胶囊 `#E8F5F3`（`≤5%` 切浅绯红 `#FCEEEF` + `↻ 建议换号`）、双池同行（窄屏自动折行）、`CTX` `▰▱` + `(used/limit)` Token 明细、`Idle` 左对齐 + 能力计数贴右对齐，支持 `"pillRounded": false` 纯矩形回退 |
 | `quartzTeal` | macOS Otty R3「蚀刻石英仪」 | 无配额行背景色，`┃` / `┆` 区分活跃池与非活跃池，`△` / `!` 提示预警与危急 |
 | `appleSystemBlue` | macOS Otty 浅色玻璃（R2） | 2 格左脊齐平、`●` 实时状态灯、`#0066CC` 仅聚焦活跃池、浅冰底 `#EBF4FF`、动态上移静态沉底 |
 | `mintlifyGlass` | 浅色玻璃薄荷对比方案 | 薄荷绿 `#009975` 强调色、薄荷雾活跃行 `#E6FAF5`、5 格双池迷你进度条 |
