@@ -1526,7 +1526,8 @@ class TestAgyHud(unittest.TestCase):
         self.assertNotIn("AI Pro", head + pools + footer)
         self.assertIn("\uE0B6● Gemini 4 Hydrogen · medium\uE0B4", head)
         self.assertIn("⎇ main", head)
-        self.assertIn("CTX ▰▱▱▱▱▱▱ 8%", head)
+        self.assertIn("CTX ▰▱▱▱▱▱▱ 8% (16k/200k)", head)
+        self.assertIn("\x1b[38;2;100;116;139m (16k/200k)\x1b[0m", lines[0])
         self.assertIn("\x1b[48;2;235;243;250m", lines[0])
         self.assertIn("\uE0B6▸ Gemini", pools)
         self.assertIn("5h ━━━━━┄ 88%", pools)
@@ -1537,6 +1538,7 @@ class TestAgyHud(unittest.TestCase):
         self.assertIn("● Idle", footer)
         self.assertIn("1 AGENTS · 3 MCPs · 24 Skills · 1 钩子", footer)
         self.assertIn("\x1b[1m\x1b[38;2;15;23;42m24\x1b[0m", lines[2])
+        self.assertEqual(hud.visual_width(lines[2]), max(hud.visual_width(lines[0]), hud.visual_width(lines[1])))
 
     def test_frosted_pills_rect_fallback_without_nerd_font(self):
         cfg = hud.build_config({"theme": "frostedPills", "style": {"pillRounded": False}, "maxWidth": 120})

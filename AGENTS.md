@@ -8,6 +8,7 @@
 ## Architecture & Constraints
 
 - **Dual Quota Pool Model**: Strictly two pools — `Gemini` (shared by all Gemini models; legacy `argon` keys merge into `Gemini`) and `3P` (third-party models). Do not introduce a separate Argon pool or re-enable `AI Pro` plan-tier fallback text in `frostedPills`.
+- **Branch Isolation (macOS vs Windows)**: `feat/mac-otty-r2-ui` is the macOS Otty-specific branch. Do NOT merge macOS-only Otty UI changes into `main`.
 - **Zero External Dependencies**: Python standard library only (`hud.py` + `test_hud.py`).
 - **Backward Compatibility**: All existing theme presets (`default`, `appleVibrancy`, `mintlifyGlass`, `appleSystemBlue`, `quartzTeal`) and existing unit tests must continue to pass without breaking or relaxing assertions.
 

@@ -286,6 +286,7 @@ _R4_FROSTED_PILLS_STYLE: dict[str, Any] = {
     "envSeparator": " · ",
     "envBoldNumbers": True,
     "envShowLiveState": True,
+    "envRightAlign": True,
     "envIndent": "",
     "barWidth": 7,
     "quotaBarWidth": 6,
@@ -452,6 +453,7 @@ THEME_PRESETS: dict[str, dict[str, Any]] = {
         "display": {
             "showQuotaBars": True,
             "showPlanTier": False,
+            "contextValue": "both",
         },
         "style": dict(_R4_FROSTED_PILLS_STYLE),
         "colors": {
@@ -465,6 +467,7 @@ THEME_PRESETS: dict[str, dict[str, Any]] = {
             "poolBadge": "#0369A1",
             "context": "#0F766E",
             "contextValue": "#0F172A",
+            "contextBreakdown": "#64748B",
             "usage": "#0F172A",
             "usageWarning": "#B45309",
             "warning": "#B45309",
@@ -2676,7 +2679,19 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     warn = float(display.get("contextWarningThreshold", 70))
     crit = float(display.get("contextCriticalThreshold", 85))
     glyphs = style.get("contextGlyphThreshold", False)
-    if glyphs and (used_pct >= crit or used_pct >= warn):
+    if colors.get("contextBreakdown") and " (" in val_text:
+        value, gap, breakdown = val_text.partition(" (")
+        if glyphs and (used_pct >= crit or used_pct >= warn):
+            glyph = "!" if used_pct >= crit else "△"
+            main_part = f"\x1b[1m{val_ansi}{value}{glyph}{RESET}"
+        elif used_pct < warn and colors.get("contextValue"):
+            ctx_val_ansi = resolve_ansi(colors.get("contextValue"), val_ansi)
+            main_part = f"\x1b[1m{ctx_val_ansi}{value}{RESET}"
+        else:
+            main_part = f"{val_ansi}{value}{RESET}"
+        bd_ansi = resolve_ansi(colors.get("contextBreakdown"), DIM)
+        val_display = f"{main_part}{colorize(gap + breakdown, bd_ansi)}"
+    elif glyphs and (used_pct >= crit or used_pct >= warn):
         glyph = "!" if used_pct >= crit else "△"
         value, gap, breakdown = val_text.partition(" (")
         val_display = f"\x1b[1m{val_ansi}{value}{glyph}{gap}{breakdown}{RESET}"
@@ -3211,6 +3226,7 @@ def render_environment_line(
     config: dict[str, Any],
     *,
     agent_state: str = "",
+    align_width: int = 0,
 ) -> str:
     display = config["display"]
     colors = config["colors"]
@@ -3260,6 +3276,9 @@ def render_environment_line(
     sep = fmt_item(str(env_separator)) if env_separator else _format_separator(config, " | ")
     body = sep.join(parts)
     if state_seg and body:
+        if style.get("envRightAlign", False) and align_width > 0:
+            gap = align_width - visual_width(indent) - visual_width(state_seg) - visual_width(body)
+            return f"{indent}{state_seg}{' ' * max(2, gap)}{body}"
         return f"{indent}{state_seg}  {body}"
     return f"{indent}{state_seg or body}"
 
@@ -3762,7 +3781,9 @@ def render_hud(
         line2 = sep_top.join(line2_parts)
     else:
         line2 = "\n".join(p for p in (ctx_line, *pool_lines) if p)
-    line3 = render_environment_line(counts, cfg, agent_state=agent_state)
+    content_w = max((visual_width(sub) for ln in (line1, line2) if ln for sub in ln.split("\n")), default=0)
+    env_align_w = min(term_w, content_w) if term_w > 0 else content_w
+    line3 = render_environment_line(counts, cfg, agent_state=agent_state, align_width=env_align_w)
     line4 = render_tools_line(transcript, cfg)
     line5 = render_agents_line(agents, cfg, now_ts)
     line6 = render_todos_line(todos, cfg)

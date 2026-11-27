@@ -23,18 +23,18 @@
 ## 2. 信息分层与布局骨架（3 + N 行结构）
 
 ```text
-● Gemini 4 Hydrogen · medium  claudespace  ⎇ main  CTX ▰▱▱▱▱▱▱ 8%  <1m
+● Gemini 4 Hydrogen · medium  claudespace  ⎇ main  CTX ▰▱▱▱▱▱▱ 8% (16k/200k)  <1m
 ▸ Gemini  5h ━━━━━┄ 88% (2h 8m) │ 7d ━━━┄┄┄ 57% (5d 20h)  ○ 3P  5h 100% · 7d 5%!
 ✓ Read ×8  ✓ Edit ×2  +1                            ← 动态活动区（按需出现）
-● Idle  1 AGENTS · 3 MCPs · 24 Skills · 1 钩子        ← 静态底座 + 实时状态（沉底）
+● Idle                       1 AGENTS · 3 MCPs · 24 Skills · 1 钩子  ← 状态左对齐，能力贴右对齐
 ```
 
 | 层级 | 职责与内容 | 视觉与排版规则 |
 | :--- | :--- | :--- |
-| **第 1 行：执行控制 & 上下文压力** | 模型名、思考档位、托管线程徽标、目录、Git 分支与变更统计、会话标题、`[sandbox]`、`CTX` 进度条、会话时长 | 左侧 `● Model · effort` 置于**淡冰蓝微胶囊** `#EBF3FA`；`●` 随实时状态变色（闲置蓝 / 工作中琥珀 / 异常红）；Git 使用简洁前缀 `⎇ branch`；`CTX` 使用 `▰`/`▱` 7 格进度条；元素间以双空格 `  ` 留白分隔 |
+| **第 1 行：执行控制 & 上下文压力** | 模型名、思考档位、托管线程徽标、目录、Git 分支与变更统计、会话标题、`[sandbox]`、`CTX` 进度条、Token 明细、会话时长 | 左侧 `● Model · effort` 置于**淡冰蓝微胶囊** `#EBF3FA`；`●` 随实时状态变色（闲置蓝 / 工作中琥珀 / 异常红）；Git 使用简洁前缀 `⎇ branch`；`CTX` 默认 `contextValue: "both"`，使用 `▰`/`▱` 7 格进度条 + 百分比 + 柔灰 `(used/limit)` Token 明细；元素间以双空格 `  ` 留白分隔 |
 | **第 2 行：双池同行微胶囊** | 激活额度池（主焦点）+ 备用额度池（降噪参照） | 激活池独占**清透浅青圆角微胶囊** `#E8F5F3`，内部以 `▸ Pool  5h ━━━━━┄ 88% (2h 8m) │ 7d ━━━┄┄┄ 57% (5d 20h)` 呈现；备用池**禁止铺底纹**，以 `○ Pool  5h 100% · 7d 5%!` 柔灰退后；任一窗口 `≤5%` 或已用 `≥90%` 红标穿透；激活池任一窗口 `≤5%` 时整颗胶囊切换为**温和浅绯红 `#FCEEEF`** 并追加 `↻ 建议换号`；宽屏同行，超出 `terminal_width` 时自动折为两行且不劈断胶囊 |
 | **动态活动区（按需）** | 独立 `agy-pool` 账号/低额告警、工具调用、子 Agent 追踪、Todo 进度 | 保持「**动态上移、静态沉底**」：仅在存在活跃或近期内容时渲染，位于第 2 行与最底行之间 |
-| **最底行：静态底座 & 实时状态** | 实时状态灯（`● Idle` / `◐ working` / `⏳ waiting` / `⚠ error`）+ `AGENTS / MCPs / Skills / 钩子` | 左对齐无缩进（`envIndent: ""`）；以 ` · ` 分隔；**数字加粗深墨 `#0F172A`，单位柔灰 `#64748B`** |
+| **最底行：静态底座 & 实时状态** | 实时状态灯（`● Idle` / `◐ working` / `⏳ waiting` / `⚠ error`）+ `AGENTS / MCPs / Skills / 钩子` | 左对齐无缩进（`envIndent: ""`）；开启 `envRightAlign: true`，右侧能力计数以空格补齐并贴齐第 1/2 行最右边缘；以 ` · ` 分隔；**数字加粗深墨 `#0F172A`，单位柔灰 `#64748B`** |
 
 ---
 
@@ -54,7 +54,7 @@
 | :--- | :--- | :--- |
 | `model` / `contextValue` / `usage` / 底栏数字 | `#0F172A` | 主墨（加粗）：模型名、健康数值、运行中工具名、底栏能力数字 |
 | `label` / `activePoolLabel` / `toolDone` | `#334155` | 次墨：窗口标签 `5h`/`7d`、`CTX` 标签、已完成工具 |
-| `modelEffort` / `envMuted` / `activePoolDim` / `inactivePool` / `quotaBarFillInactive` | `#64748B` | 辅助柔灰：思考档位、倒计时 `(2h 8m)`、非活跃池文本与健康条、底栏单位 |
+| `modelEffort` / `contextBreakdown` / `envMuted` / `activePoolDim` / `inactivePool` / `quotaBarFillInactive` | `#64748B` | 辅助柔灰：思考档位、CTX Token 明细 `(16k/200k)`、倒计时 `(2h 8m)`、非活跃池文本与健康条、底栏单位 |
 | `separator` / `barTrack` / `quotaBarTrackActive` / `quotaBarTrackInactive` | `#CBD5E1` | 发丝结构色：胶囊内 `│`、进度条空轨 `▱`/`┄` |
 | `modelPrefix` / `poolBadge` | `#0369A1` | Apple 蓝：待机模型圆点 `●`、托管线程徽标 |
 | `project` / `success` | `#047857` | 翡翠绿：项目目录、`● Idle` 状态灯、`✓` 完成标志 |
