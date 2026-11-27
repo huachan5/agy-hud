@@ -272,6 +272,28 @@ _R3_QUARTZ_STYLE: dict[str, Any] = {
     "quotaBucketGap": 3,
 }
 
+_R4_FROSTED_PILLS_STYLE: dict[str, Any] = {
+    **_R3_QUARTZ_STYLE,
+    "separator": "  ",
+    "headerDivider": None,
+    "modelPill": True,
+    "pillRounded": True,
+    "effortStyle": "dot",
+    "gitPrefixSymbol": "⎇ ",
+    "contextLabelOverride": "CTX",
+    "inlinePoolsRow": True,
+    "activePoolDangerThreshold": 5.0,
+    "envSeparator": " · ",
+    "envBoldNumbers": True,
+    "envShowLiveState": True,
+    "envIndent": "",
+    "barWidth": 7,
+    "quotaBarWidth": 6,
+    "quotaPadPct": False,
+    "quotaGlyphThreshold": True,
+    "contextGlyphThreshold": True,
+}
+
 THEME_PRESETS: dict[str, dict[str, Any]] = {
     "appleVibrancy": {
         "style": {
@@ -426,6 +448,53 @@ THEME_PRESETS: dict[str, dict[str, Any]] = {
             "barEmpty": "┄",
         },
     },
+    "frostedPills": {
+        "display": {
+            "showQuotaBars": True,
+            "showPlanTier": False,
+        },
+        "style": dict(_R4_FROSTED_PILLS_STYLE),
+        "colors": {
+            "model": "#0F172A",
+            "modelEffort": "#64748B",
+            "modelPillBg": "#EBF3FA",
+            "modelPrefix": "#0369A1",
+            "project": "#047857",
+            "git": "#6D28D9",
+            "gitBranch": "#6D28D9",
+            "poolBadge": "#0369A1",
+            "context": "#0F766E",
+            "contextValue": "#0F172A",
+            "usage": "#0F172A",
+            "usageWarning": "#B45309",
+            "warning": "#B45309",
+            "critical": "#DC2626",
+            "success": "#047857",
+            "label": "#334155",
+            "envMuted": "#64748B",
+            "separator": "#CBD5E1",
+            "barTrack": "#CBD5E1",
+            "ctxBarFilled": "▰",
+            "ctxBarEmpty": "▱",
+            "quotaBarFill": "#0F766E",
+            "quotaBarFillMid": "#B45309",
+            "quotaBarFillInactive": "#64748B",
+            "quotaBarTrackActive": "#CBD5E1",
+            "quotaBarTrackInactive": "#CBD5E1",
+            "toolRunning": "#0F172A",
+            "toolDone": "#334155",
+            "activePool": "frostedPill",
+            "activePoolBg": "#E8F5F3",
+            "activePoolDangerBg": "#FCEEEF",
+            "activePoolAccent": "#0F766E",
+            "activePoolLabel": "#334155",
+            "activePoolDim": "#64748B",
+            "inactivePool": "#64748B",
+            "custom": "#C2410C",
+            "barFilled": "━",
+            "barEmpty": "┄",
+        },
+    },
 }
 
 
@@ -518,6 +587,16 @@ def resolve_bg_ansi(value: Any, fallback: str) -> str:
     return fallback
 
 
+def _wrap_frosted_pill(content: str, bg_color: Any, *, rounded: bool = True) -> str:
+    """Wrap ANSI text in a frosted tint pill (Nerd Font rounded caps or plain rect)."""
+    bg_ansi = resolve_bg_ansi(bg_color, "\x1b[48;2;235;243;250m")
+    fg_cap_ansi = resolve_ansi(bg_color, "\x1b[38;2;235;243;250m")
+    painted = content.replace(RESET, f"{RESET}{bg_ansi}")
+    if rounded:
+        return f"{fg_cap_ansi}\uE0B6{RESET}{bg_ansi}{painted}{RESET}{fg_cap_ansi}\uE0B4{RESET}"
+    return f"{bg_ansi} {painted} {RESET}"
+
+
 def _format_separator(config: dict[str, Any], default_sep: str) -> str:
     style = config.get("style") or {}
     raw_sep = style.get("separator")
@@ -599,8 +678,8 @@ def render_bar(
     if st.get("minFilledWhenPositive") and safe_pct > 0 and filled == 0:
         filled = 1
     empty = max(0, bar_w - filled)
-    filled_ch = str(colors.get("barFilled") or "█")
-    empty_ch = str(colors.get("barEmpty") or "░")
+    filled_ch = str(colors.get("ctxBarFilled") or colors.get("barFilled") or "█")
+    empty_ch = str(colors.get("ctxBarEmpty") or colors.get("barEmpty") or "░")
     ansi = context_ansi(safe_pct, display, colors)
     track_ansi = resolve_ansi(colors.get("barTrack"), DIM)
     return f"{ansi}{filled_ch * filled}{track_ansi}{empty_ch * empty}{RESET}"
@@ -2317,6 +2396,8 @@ def render_quota_mini_bar(
         fill_ansi = resolve_ansi(colors.get("critical"), RED)
     elif used_pct >= 75:
         fill_ansi = resolve_ansi(colors.get("usageWarning"), BRIGHT_MAGENTA)
+    elif is_active and colors.get("quotaBarFillMid") and used_pct >= 40:
+        fill_ansi = resolve_ansi(colors.get("quotaBarFillMid"), YELLOW)
     elif (not is_active) and colors.get("quotaBarFillInactive"):
         fill_ansi = resolve_ansi(colors.get("quotaBarFillInactive"), DIM)
     elif colors.get("quotaBarFill"):
@@ -2377,34 +2458,68 @@ def render_project_line(
         if not raw_name and transcript.get("last_model"):
             raw_name = str(transcript["last_model"])
         clean_model, effort = parse_model_and_effort(raw_name, model_id)
-        badge_inner = clean_model
-        if display.get("showEffortLevel", True) and effort:
-            sym = EFFORT_SYMBOLS.get(effort, "")
-            ef_fmt = display.get("effortFormat", "full")
-            if ef_fmt == "symbol" and sym:
-                badge_inner = f"{clean_model} {sym}"
-            elif ef_fmt == "text" or not sym:
-                badge_inner = f"{clean_model} {effort}"
-            else:
-                badge_inner = f"{clean_model} {sym} {effort}"
-        model_txt = f"[{badge_inner}]" if style.get("modelBrackets", True) else badge_inner
-        if style.get("modelBold", False):
-            m_seg = colorize(model_txt, f"\x1b[1m{resolve_ansi(colors.get('model'), CYAN)}")
-        else:
-            m_seg = c_model(model_txt, colors)
-        if style.get("modelPrefix"):
+        if style.get("modelPill", False):
+            model_core = colorize(clean_model, f"\x1b[1m{resolve_ansi(colors.get('model'), CYAN)}")
+            model_inner = model_core
+            if display.get("showEffortLevel", True) and effort:
+                effort_ansi = resolve_ansi(colors.get("modelEffort") or colors.get("label"), DIM)
+                if style.get("effortStyle") == "dot":
+                    effort_txt = f" · {effort}"
+                else:
+                    sym = EFFORT_SYMBOLS.get(effort, "")
+                    ef_fmt = display.get("effortFormat", "full")
+                    if ef_fmt == "symbol" and sym:
+                        effort_txt = f" {sym}"
+                    elif ef_fmt == "text" or not sym:
+                        effort_txt = f" {effort}"
+                    else:
+                        effort_txt = f" {sym} {effort}"
+                model_inner = f"{model_core}{colorize(effort_txt, effort_ansi)}"
             if style.get("liveStatusDot", False):
                 st_live = str(data.get("agent_state") or "idle").lower()
                 if st_live in ("working", "waiting"):
-                    prefix_ansi = resolve_ansi(colors.get("warning"), YELLOW)
+                    dot_ansi = resolve_ansi(colors.get("warning"), YELLOW)
                 elif st_live == "error":
-                    prefix_ansi = resolve_ansi(colors.get("critical"), RED)
+                    dot_ansi = resolve_ansi(colors.get("critical"), RED)
                 else:
-                    prefix_ansi = resolve_ansi(colors.get("success") or colors.get("modelPrefix"), GREEN)
+                    dot_ansi = resolve_ansi(colors.get("modelPrefix") or colors.get("success"), CYAN)
             else:
-                prefix_ansi = resolve_ansi(colors.get("modelPrefix") or colors.get("model"), CYAN)
-            m_seg = f"{colorize(str(style['modelPrefix']), prefix_ansi)}{m_seg}"
-        parts.append(m_seg)
+                dot_ansi = resolve_ansi(colors.get("modelPrefix") or colors.get("model"), CYAN)
+            m_seg = _wrap_frosted_pill(
+                f"{colorize('●', dot_ansi)} {model_inner}",
+                colors.get("modelPillBg") or "#EBF3FA",
+                rounded=bool(style.get("pillRounded", True)),
+            )
+            parts.append(m_seg)
+        else:
+            badge_inner = clean_model
+            if display.get("showEffortLevel", True) and effort:
+                sym = EFFORT_SYMBOLS.get(effort, "")
+                ef_fmt = display.get("effortFormat", "full")
+                if ef_fmt == "symbol" and sym:
+                    badge_inner = f"{clean_model} {sym}"
+                elif ef_fmt == "text" or not sym:
+                    badge_inner = f"{clean_model} {effort}"
+                else:
+                    badge_inner = f"{clean_model} {sym} {effort}"
+            model_txt = f"[{badge_inner}]" if style.get("modelBrackets", True) else badge_inner
+            if style.get("modelBold", False):
+                m_seg = colorize(model_txt, f"\x1b[1m{resolve_ansi(colors.get('model'), CYAN)}")
+            else:
+                m_seg = c_model(model_txt, colors)
+            if style.get("modelPrefix"):
+                if style.get("liveStatusDot", False):
+                    st_live = str(data.get("agent_state") or "idle").lower()
+                    if st_live in ("working", "waiting"):
+                        prefix_ansi = resolve_ansi(colors.get("warning"), YELLOW)
+                    elif st_live == "error":
+                        prefix_ansi = resolve_ansi(colors.get("critical"), RED)
+                    else:
+                        prefix_ansi = resolve_ansi(colors.get("success") or colors.get("modelPrefix"), GREEN)
+                else:
+                    prefix_ansi = resolve_ansi(colors.get("modelPrefix") or colors.get("model"), CYAN)
+                m_seg = f"{colorize(str(style['modelPrefix']), prefix_ansi)}{m_seg}"
+            parts.append(m_seg)
 
     # 1.5 Optional agy-pool thread badge
     pool_cfg = config.get("pool") or {}
@@ -2452,7 +2567,11 @@ def render_project_line(
                 inner.append(colorize(f"✘{fs_stats['deleted']}", resolve_ansi(colors.get("critical"), RED)))
             if fs_stats.get("untracked", 0) > 0:
                 inner.append(c_label(f"?{fs_stats['untracked']}", colors))
-        git_seg = f"{c_git('git:(', colors)}{' '.join(inner)}{c_git(')', colors)}"
+        if style.get("gitPrefixSymbol"):
+            git_sym = colorize(str(style["gitPrefixSymbol"]), resolve_ansi(colors.get("git"), MAGENTA))
+            git_seg = f"{git_sym}{' '.join(inner)}"
+        else:
+            git_seg = f"{c_git('git:(', colors)}{' '.join(inner)}{c_git(')', colors)}"
 
     if project_seg and git_seg:
         parts.append(f"{project_seg} {git_seg}")
@@ -2567,7 +2686,8 @@ def render_context_segment(data: dict[str, Any], transcript: dict[str, Any], con
     else:
         val_display = f"{val_ansi}{val_text}{RESET}"
 
-    lbl = c_label(tr(config, "label.context"), colors)
+    ctx_lbl_text = str(style.get("contextLabelOverride") or tr(config, "label.context"))
+    lbl = c_label(ctx_lbl_text, colors)
     if display.get("showContextBar", True):
         bar = render_bar(used_pct, 8, display, colors, style=style)
         seg = f"{lbl} {bar} {val_display}"
@@ -2852,6 +2972,99 @@ def _render_pool_alert(
     return colorize(msg, warn_styled)
 
 
+def _render_frosted_pool_lines(
+    chosen: list[str],
+    stdin_pools: dict[str, dict[str, dict[str, Any]]],
+    active_key: str,
+    mode: str,
+    show_bars: bool,
+    config: dict[str, Any],
+    *,
+    max_width: int = 0,
+) -> list[str]:
+    colors = config["colors"]
+    style = config.get("style") or {}
+    q_bar_w = int(style.get("quotaBarWidth") or 6)
+    no_colon = bool(style.get("quotaNoColon", False))
+    glyphs = bool(style.get("quotaGlyphThreshold", False))
+    rounded = bool(style.get("pillRounded", True))
+    danger_th = float(style.get("activePoolDangerThreshold", 5.0))
+    is_remaining = mode != "used"
+    is_zh = str(config.get("language") or "zh-Hans").lower().startswith("zh")
+
+    crit_ansi = resolve_ansi(colors.get("critical"), RED)
+    warn_ansi = resolve_ansi(colors.get("usageWarning"), YELLOW)
+    usage_ansi = resolve_ansi(colors.get("usage"), "#0F172A")
+    label_ansi = resolve_ansi(colors.get("activePoolLabel"), "#334155")
+    dim_ansi = resolve_ansi(colors.get("activePoolDim"), "#64748B")
+    sep_ansi = resolve_ansi(colors.get("separator"), DIM)
+    inact_ansi = resolve_ansi(colors.get("inactivePool"), "#64748B")
+    ok_accent = resolve_ansi(colors.get("activePoolAccent"), "#0F766E")
+
+    active_pills: list[str] = []
+    standby_strs: list[str] = []
+
+    for k in chosen:
+        pool_data = stdin_pools.get(k) or {}
+        if not pool_data:
+            continue
+        label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
+        is_act = (k == active_key)
+        ordered = [b for b in ("5h", "1d", "7d") if b in pool_data]
+        ordered.extend(sorted(b for b in pool_data if b not in ("5h", "1d", "7d")))
+        if not ordered:
+            continue
+
+        if is_act:
+            is_danger = any(float(pool_data[b]["remaining_percentage"]) <= danger_th for b in ordered)
+            pill_bg = (colors.get("activePoolDangerBg") or "#FCEEEF") if is_danger else (colors.get("activePoolBg") or "#E8F5F3")
+            accent = crit_ansi if is_danger else ok_accent
+            tag_str = colorize(f"▸ {label_text}", f"\x1b[1m{accent}")
+            bucket_parts: list[str] = []
+            for b_name in ordered:
+                info = pool_data[b_name]
+                rem = float(info["remaining_percentage"])
+                used_pct = 100.0 - rem
+                pct_val = max(0, min(100, round(rem))) if is_remaining else max(0, min(100, round(used_pct)))
+                bar_pct = rem if is_remaining else used_pct
+                bar_str = f"{render_quota_mini_bar(bar_pct, is_remaining, colors, width=q_bar_w, is_active=True)} " if show_bars else ""
+                b_key = b_name if no_colon else f"{b_name}:"
+                b_danger = rem <= danger_th or used_pct >= 90
+                b_warn = (not b_danger) and used_pct >= 75
+                suffix = "!" if b_danger else ("△" if (glyphs and b_warn) else "")
+                pct_txt = f"{pct_val}%{suffix}"
+                pct_ansi = crit_ansi if b_danger else (warn_ansi if b_warn else usage_ansi)
+                rst = str(info.get("refreshes_in") or ("now" if info.get("reset_due") else ""))
+                s = f"{colorize(b_key, label_ansi)} {bar_str}\x1b[1m{pct_ansi}{pct_txt}{RESET}"
+                if rst:
+                    s += f" {colorize(f'({rst})', dim_ansi)}"
+                bucket_parts.append(s)
+            inner = f"{tag_str}  {f' {colorize(chr(0x2502), sep_ansi)} '.join(bucket_parts)}"
+            if is_danger:
+                handoff_txt = " ↻ 建议换号" if is_zh else " ↻ switch"
+                inner += colorize(handoff_txt, f"\x1b[1m{crit_ansi}")
+            active_pills.append(_wrap_frosted_pill(inner, pill_bg, rounded=rounded))
+        else:
+            stb_parts: list[str] = []
+            for b_name in ordered:
+                info = pool_data[b_name]
+                rem = float(info["remaining_percentage"])
+                used_pct = 100.0 - rem
+                pct_val = max(0, min(100, round(rem))) if is_remaining else max(0, min(100, round(used_pct)))
+                b_key = b_name if no_colon else f"{b_name}:"
+                b_danger = rem <= danger_th or used_pct >= 90
+                pct_txt = f"{pct_val}%!" if b_danger else f"{pct_val}%"
+                val_str = colorize(pct_txt, f"\x1b[1m{crit_ansi}") if b_danger else colorize(pct_txt, inact_ansi)
+                stb_parts.append(f"{colorize(b_key, inact_ansi)} {val_str}")
+            standby_strs.append(f"{colorize(f'○ {label_text}', inact_ansi)}  {colorize(' · ', inact_ansi).join(stb_parts)}")
+
+    if style.get("inlinePoolsRow", False) and active_pills and standby_strs:
+        combined = "  ".join([*active_pills, *standby_strs])
+        if max_width <= 0 or visual_width(combined) <= max_width:
+            return [combined]
+    return [*active_pills, *standby_strs]
+
+
 def render_usage_blocks(
     data: dict[str, Any],
     stdin_pools: dict[str, dict[str, dict[str, Any]]],
@@ -2859,6 +3072,7 @@ def render_usage_blocks(
     config: dict[str, Any],
     pool_ctx: dict[str, Any] | None = None,
     now: float | None = None,
+    max_width: int = 0,
 ) -> tuple[str, list[str]]:
     display = config["display"]
     colors = config["colors"]
@@ -2882,6 +3096,7 @@ def render_usage_blocks(
 
     inline_segments: list[str] = []
     pool_rows: list[tuple[str, list[str], bool]] = []
+    aligned_pools: list[str] = []
 
     if stdin_pools:
         if pool_mode == "active":
@@ -2897,28 +3112,40 @@ def render_usage_blocks(
                     order.append(k)
             chosen = [k for k in order if stdin_pools.get(k)]
 
-        bucket_order = None
-        if colors.get("activePool") == "quartzSpine":
-            names = {bucket for k in chosen for bucket in stdin_pools[k]}
-            standard = ("5h", "1d", "7d")
-            bucket_order = [name for name in standard if name in names]
-            bucket_order.extend(sorted(names.difference(standard)))
-
-        for k in chosen:
-            label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
-            is_act = (k == active_key)
-            lbl, buckets = _format_pool_parts(
-                label_text,
-                stdin_pools[k],
-                is_active=is_act,
-                mode=mode,
-                show_bars=show_bars,
-                colors=colors,
-                style=config.get("style"),
-                bucket_order=bucket_order,
+        if colors.get("activePool") == "frostedPill":
+            aligned_pools = _render_frosted_pool_lines(
+                chosen,
+                stdin_pools,
+                active_key,
+                mode,
+                show_bars,
+                config,
+                max_width=max_width,
             )
-            if buckets:
-                pool_rows.append((lbl, buckets, is_act))
+            pool_rows = []
+        else:
+            bucket_order = None
+            if colors.get("activePool") == "quartzSpine":
+                names = {bucket for k in chosen for bucket in stdin_pools[k]}
+                standard = ("5h", "1d", "7d")
+                bucket_order = [name for name in standard if name in names]
+                bucket_order.extend(sorted(names.difference(standard)))
+
+            for k in chosen:
+                label_text = POOL_DISPLAY_LABELS.get(k, k.capitalize())
+                is_act = (k == active_key)
+                lbl, buckets = _format_pool_parts(
+                    label_text,
+                    stdin_pools[k],
+                    is_active=is_act,
+                    mode=mode,
+                    show_bars=show_bars,
+                    colors=colors,
+                    style=config.get("style"),
+                    bucket_order=bucket_order,
+                )
+                if buckets:
+                    pool_rows.append((lbl, buckets, is_act))
     elif "remaining_percentage" in agy_quota_fallback:
         rem = float(agy_quota_fallback["remaining_percentage"])
         if mode == "used":
@@ -2935,7 +3162,7 @@ def render_usage_blocks(
             q_txt += f" {c_label(f'({reset_in})', colors)}"
         inline_segments.append(q_txt)
 
-    if not pool_rows and not inline_segments and display.get("showPlanTier", True) and data.get("plan_tier"):
+    if not pool_rows and not aligned_pools and not inline_segments and display.get("showPlanTier", True) and data.get("plan_tier"):
         plan_short = shorten_plan_tier(str(data["plan_tier"]))
         if plan_short:
             inline_segments.append(c_label(plan_short, colors))
@@ -2947,7 +3174,8 @@ def render_usage_blocks(
         if in_t or out_t:
             inline_segments.append(c_label(f"↑{format_tokens(in_t)} ↓{format_tokens(out_t)}", colors))
 
-    aligned_pools = _align_pool_rows(pool_rows, colors=colors, style=config.get("style"))
+    if colors.get("activePool") != "frostedPill":
+        aligned_pools = _align_pool_rows(pool_rows, colors=colors, style=config.get("style"))
     alert = _render_pool_alert(data, stdin_pools, agy_quota_fallback, pool_ctx, active_key, config, now_ts)
     if alert:
         if (config.get("style") or {}).get("dedicatedAlertLine", False):
@@ -2978,32 +3206,62 @@ def render_usage_segment(
     return _format_separator(config, " │ ").join(parts)
 
 
-def render_environment_line(counts: dict[str, int], config: dict[str, Any]) -> str:
+def render_environment_line(
+    counts: dict[str, int],
+    config: dict[str, Any],
+    *,
+    agent_state: str = "",
+) -> str:
     display = config["display"]
     colors = config["colors"]
     style = config.get("style") or {}
-    if not display.get("showConfigCounts", True):
-        return ""
     env_ansi = resolve_ansi(colors.get("envMuted"), DIM) if colors.get("envMuted") else ""
     fmt_item = (lambda s: colorize(s, env_ansi)) if env_ansi else (lambda s: c_label(s, colors))
+    bold_nums = bool(style.get("envBoldNumbers", False))
+    ink_ansi = resolve_ansi(colors.get("model"), "#0F172A")
+
+    def _fmt_count(num: int, unit: str) -> str:
+        if bold_nums:
+            return f"{colorize(str(num), f'\x1b[1m{ink_ansi}')} {fmt_item(unit)}"
+        return fmt_item(f"{num} {unit}")
+
+    state_seg = ""
+    if style.get("envShowLiveState", False) and agent_state:
+        st_low = agent_state.lower()
+        if st_low == "idle":
+            state_seg = colorize("● Idle", f"\x1b[1m{resolve_ansi(colors.get('success'), GREEN)}")
+        elif st_low == "working":
+            state_seg = colorize("◐ working", f"\x1b[1m{resolve_ansi(colors.get('warning'), YELLOW)}")
+        elif st_low == "waiting":
+            state_seg = colorize("⏳ waiting", f"\x1b[1m{resolve_ansi(colors.get('warning'), YELLOW)}")
+        elif st_low == "error":
+            state_seg = colorize("⚠ error", f"\x1b[1m{resolve_ansi(colors.get('critical'), RED)}")
+        else:
+            state_seg = colorize(f"● {agent_state}", f"\x1b[1m{resolve_ansi(colors.get('label'), DIM)}")
+
     parts: list[str] = []
-    if counts.get("agentsMdCount", 0) > 0:
-        ag_lbl = "AGENTS" if style.get("agentsShortLabel", False) else "AGENTS.md"
-        parts.append(fmt_item(f"{counts['agentsMdCount']} {ag_lbl}"))
-    if counts.get("rulesCount", 0) > 0:
-        parts.append(fmt_item(f"{counts['rulesCount']} {tr(config, 'label.rules')}"))
-    if counts.get("mcpCount", 0) > 0:
-        parts.append(fmt_item(f"{counts['mcpCount']} MCPs"))
-    if display.get("showSkillCounts", True) and counts.get("skillsCount", 0) > 0:
-        parts.append(fmt_item(f"{counts['skillsCount']} {tr(config, 'label.skills')}"))
-    if counts.get("hooksCount", 0) > 0:
-        parts.append(fmt_item(f"{counts['hooksCount']} {tr(config, 'label.hooks')}"))
-    if not parts:
+    if display.get("showConfigCounts", True):
+        if counts.get("agentsMdCount", 0) > 0:
+            ag_lbl = "AGENTS" if style.get("agentsShortLabel", False) else "AGENTS.md"
+            parts.append(_fmt_count(counts["agentsMdCount"], ag_lbl))
+        if counts.get("rulesCount", 0) > 0:
+            parts.append(_fmt_count(counts["rulesCount"], tr(config, "label.rules")))
+        if counts.get("mcpCount", 0) > 0:
+            parts.append(_fmt_count(counts["mcpCount"], "MCPs"))
+        if display.get("showSkillCounts", True) and counts.get("skillsCount", 0) > 0:
+            parts.append(_fmt_count(counts["skillsCount"], tr(config, "label.skills")))
+        if counts.get("hooksCount", 0) > 0:
+            parts.append(_fmt_count(counts["hooksCount"], tr(config, "label.hooks")))
+
+    if not state_seg and not parts:
         return ""
     indent = str(style.get("envIndent") or "")
     env_separator = style.get("envSeparator")
     sep = fmt_item(str(env_separator)) if env_separator else _format_separator(config, " | ")
-    return f"{indent}{sep.join(parts)}"
+    body = sep.join(parts)
+    if state_seg and body:
+        return f"{indent}{state_seg}  {body}"
+    return f"{indent}{state_seg or body}"
 
 
 def _format_tool_name(name: str, display: dict[str, Any]) -> str:
@@ -3475,6 +3733,7 @@ def render_hud(
         )
     )
 
+    term_w = get_terminal_width(cfg, data=data)
     inline_ctx = bool((cfg.get("style") or {}).get("inlineContext", False))
     ctx_seg = render_context_segment(data, transcript, cfg)
     line1 = render_project_line(
@@ -3493,6 +3752,7 @@ def render_hud(
         cfg,
         pool_ctx=pool_ctx,
         now=now_ts,
+        max_width=term_w,
     )
     sep_top = _format_separator(cfg, " │ ")
     ctx_for_line2 = "" if inline_ctx else ctx_seg
@@ -3502,7 +3762,7 @@ def render_hud(
         line2 = sep_top.join(line2_parts)
     else:
         line2 = "\n".join(p for p in (ctx_line, *pool_lines) if p)
-    line3 = render_environment_line(counts, cfg)
+    line3 = render_environment_line(counts, cfg, agent_state=agent_state)
     line4 = render_tools_line(transcript, cfg)
     line5 = render_agents_line(agents, cfg, now_ts)
     line6 = render_todos_line(todos, cfg)

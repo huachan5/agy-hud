@@ -1496,6 +1496,108 @@ class TestAgyHud(unittest.TestCase):
                 for value in expected:
                     self.assertIn(value, strip_ansi(row))
 
+    def test_frosted_pills_renders_g1_three_line_layout(self):
+        cfg = hud.build_config({"theme": "frostedPills", "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Hydrogen (Medium)"},
+            "plan_tier": "Google AI Pro",
+            "cwd": "/tmp/claudespace",
+            "agent_state": "idle",
+            "context_window": {"used_percentage": 8, "context_window_size": 200000, "used_tokens": 16000},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.88, "reset_in_seconds": 7680},
+                "gemini-weekly": {"remaining_fraction": 0.57, "reset_in_seconds": 504000},
+                "3p-5h": {"remaining_fraction": 1.0, "reset_in_seconds": 0},
+                "3p-weekly": {"remaining_fraction": 0.05, "reset_in_seconds": 489600},
+            },
+        }
+        counts = {"agentsMdCount": 1, "rulesCount": 0, "mcpCount": 3, "skillsCount": 24, "hooksCount": 1}
+        git_info = {"branch": "main", "dirty": False, "ahead": 0, "behind": 0}
+        with (
+            mock.patch.object(hud, "count_agy_configs", return_value=counts),
+            mock.patch.object(hud, "get_git_status", return_value=git_info),
+            mock.patch.object(hud, "resolve_transcript_path", return_value=None),
+        ):
+            rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+
+        lines = rendered.splitlines()
+        self.assertEqual(len(lines), 3)
+        head, pools, footer = map(strip_ansi, lines)
+        self.assertNotIn("AI Pro", head + pools + footer)
+        self.assertIn("\uE0B6● Gemini 4 Hydrogen · medium\uE0B4", head)
+        self.assertIn("⎇ main", head)
+        self.assertIn("CTX ▰▱▱▱▱▱▱ 8%", head)
+        self.assertIn("\x1b[48;2;235;243;250m", lines[0])
+        self.assertIn("\uE0B6▸ Gemini", pools)
+        self.assertIn("5h ━━━━━┄ 88%", pools)
+        self.assertIn("7d ━━━┄┄┄ 57%", pools)
+        self.assertIn("○ 3P  5h 100% · 7d 5%!", pools)
+        self.assertIn("\x1b[48;2;232;245;243m", lines[1])
+        self.assertIn("\x1b[1m\x1b[38;2;220;38;38m5%!", lines[1])
+        self.assertIn("● Idle", footer)
+        self.assertIn("1 AGENTS · 3 MCPs · 24 Skills · 1 钩子", footer)
+        self.assertIn("\x1b[1m\x1b[38;2;15;23;42m24\x1b[0m", lines[2])
+
+    def test_frosted_pills_rect_fallback_without_nerd_font(self):
+        cfg = hud.build_config({"theme": "frostedPills", "style": {"pillRounded": False}, "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Neon (High)"},
+            "quota": SAMPLE_QUOTA,
+        }
+        rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+        self.assertNotIn("\uE0B6", rendered)
+        self.assertNotIn("\uE0B4", rendered)
+        self.assertIn("\x1b[48;2;235;243;250m", rendered)
+        self.assertIn("\x1b[48;2;232;245;243m", rendered)
+
+    def test_frosted_pills_danger_switches_to_rose_bg_and_handoff_hint(self):
+        cfg = hud.build_config({"theme": "frostedPills", "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Neon (High)"},
+            "quota": {
+                "gemini-5h": {"remaining_fraction": 0.04, "reset_in_seconds": 2280},
+                "gemini-weekly": {"remaining_fraction": 0.21, "reset_in_seconds": 378000},
+                "3p-5h": {"remaining_fraction": 1.0, "reset_in_seconds": 0},
+            },
+        }
+        rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+        self.assertIn("\x1b[48;2;252;238;239m", rendered)
+        self.assertNotIn("\x1b[48;2;232;245;243m", rendered)
+        self.assertIn("4%! (38m)", strip_ansi(rendered))
+        self.assertIn("↻ 建议换号", strip_ansi(rendered))
+
+    def test_frosted_pills_narrow_width_splits_pools_without_breaking_pill(self):
+        cfg = hud.build_config({"theme": "frostedPills", "maxWidth": 60})
+        data = {"model": {"display_name": "Gemini 4 Hydrogen (Medium)"}}
+        pools = {
+            "gemini": {
+                "5h": {"remaining_percentage": 88, "refreshes_in": "2h 8m"},
+                "7d": {"remaining_percentage": 57, "refreshes_in": "5d 20h"},
+            },
+            "3p": {
+                "5h": {"remaining_percentage": 100, "refreshes_in": "now"},
+                "7d": {"remaining_percentage": 5, "refreshes_in": "5d 16h"},
+            },
+        }
+        _, rows = hud.render_usage_blocks(data, pools, {}, cfg, max_width=60)
+        self.assertEqual(len(rows), 2)
+        self.assertTrue(strip_ansi(rows[0]).startswith("\uE0B6▸ Gemini"))
+        self.assertTrue(strip_ansi(rows[0]).endswith("\uE0B4"))
+        self.assertTrue(strip_ansi(rows[1]).startswith("○ 3P"))
+
+    def test_frosted_pills_without_quota_hides_plan_tier_and_does_not_crash(self):
+        cfg = hud.build_config({"theme": "frostedPills", "maxWidth": 120})
+        payload = {
+            "model": {"display_name": "Gemini 4 Neon (High)"},
+            "plan_tier": "Google AI Pro",
+            "cwd": "/tmp/claudespace",
+            "agent_state": "idle",
+        }
+        rendered = hud.render_hud(payload, cfg, now=1000, allow_bg_refresh=False)
+        plain = strip_ansi(rendered)
+        self.assertNotIn("AI Pro", plain)
+        self.assertIn("Gemini 4 Neon", plain)
+
 
 if __name__ == "__main__":
     unittest.main()
